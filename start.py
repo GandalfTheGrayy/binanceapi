@@ -9,28 +9,29 @@ import time
 from threading import Thread
 
 def start_fastapi():
-    """FastAPI backend'i başlat"""
+    """FastAPI backend'i başlat - Ana portta (Render'da dışarıya açık)"""
     print("🚀 FastAPI backend başlatılıyor...")
+    # Render'da $PORT environment variable'ı ana port (dışarıya açık)
+    port = os.getenv("PORT", "8000")
     cmd = [
         sys.executable, "-m", "uvicorn", 
         "app.main:app", 
         "--host", "0.0.0.0", 
-        "--port", "8000"
+        "--port", port
     ]
     subprocess.run(cmd)
 
 def start_streamlit():
-    """Streamlit frontend'i başlat"""
+    """Streamlit frontend'i başlat - Sabit 8501 portunda (internal)"""
     print("🎨 Streamlit frontend başlatılıyor...")
     # FastAPI'nin başlaması için kısa bir bekleme
     time.sleep(3)
     
-    # Render'da $PORT environment variable'ı ana port
-    port = os.getenv("PORT", "8501")
+    # Streamlit'i sabit 8501 portunda çalıştır (internal)
     cmd = [
         sys.executable, "-m", "streamlit", "run", 
         "streamlit_app.py",
-        "--server.port", port,
+        "--server.port", "8501",
         "--server.address", "0.0.0.0",
         "--server.headless", "true",
         "--server.enableCORS", "false",
