@@ -33,7 +33,9 @@ app.add_middleware(
 )
 
 # Static and templates
-app.mount("/static", StaticFiles(directory="static"), name="static")
+# Not: Streamlit kendi statik dosyalarını "/static" altında sunar; çakışmayı önlemek için
+# uygulamanın kendi statiklerini "/assets" altında sunuyoruz.
+app.mount("/assets", StaticFiles(directory="static"), name="assets")
 templates = Jinja2Templates(directory="templates")
 
 # Routers
