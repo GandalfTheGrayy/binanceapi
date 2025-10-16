@@ -56,11 +56,10 @@ handle_webhook()
 # .env dosyasındaki PORT ve base URL'lere göre otomatik bağlanır.
 # Render deployment için BACKEND_URL environment variable'ını kullanır.
 
-# Render'da BACKEND_URL environment variable'ı backend service'den otomatik gelir
-DEFAULT_BASE = "http://127.0.0.1:8000"
-
-BACKEND_URL = os.getenv("BACKEND_URL")  # Render'dan gelen backend URL
-BASE_URL = (BACKEND_URL if BACKEND_URL else os.getenv("FRONTEND_BACKEND_URL", DEFAULT_BASE)).rstrip("/")
+DEFAULT_BASE = os.getenv("DEFAULT_BASE", "http://127.0.0.1:8000")
+BACKEND_URL = os.getenv("BACKEND_URL", "").strip()
+FRONTEND_BACKEND_URL = os.getenv("FRONTEND_BACKEND_URL", "").strip()
+BASE_URL = (BACKEND_URL or FRONTEND_BACKEND_URL or DEFAULT_BASE).rstrip("/")
 
 # HTTP timeout to avoid UI freeze on unreachable backend
 TIMEOUT = float(os.getenv("FRONTEND_HTTP_TIMEOUT", "5"))
@@ -143,7 +142,7 @@ def post_json(path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
 with st.sidebar:
     st.header("Durum ve Hızlı Aksiyonlar")
     alive = backend_alive()
-    # Kırık endpoint yerine .env’den oku
+    # .env’den oku
     dry_run = os.getenv("DRY_RUN", "false").strip().lower() == "true"
     bbase = os.getenv("BINANCE_BASE_URL", "—")
 
