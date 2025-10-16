@@ -5,9 +5,49 @@ import streamlit as st
 from typing import Dict, Any
 import pandas as pd
 from dotenv import load_dotenv
+import sys
+from urllib.parse import parse_qs
 
 # .env yükle
 load_dotenv()
+
+# ============================================================================
+# WEBHOOK HANDLER - TradingView webhook'larını handle eder
+# ============================================================================
+
+def handle_webhook():
+    """TradingView webhook'unu handle et"""
+    try:
+        # URL parametrelerini kontrol et
+        query_params = st.experimental_get_query_params()
+        
+        # Webhook endpoint kontrolü
+        if "webhook" in query_params and query_params["webhook"][0] == "tradingview":
+            st.write("🔔 **TradingView Webhook Alındı**")
+            
+            # Webhook body'sini simüle et (gerçek webhook'ta POST body gelir)
+            # Streamlit'te POST body'yi direkt alamayız, bu yüzden query params kullanıyoruz
+            webhook_data = {
+                "signal": query_params.get("signal", ["AL"])[0],
+                "symbol": query_params.get("symbol", ["BTCUSDT"])[0], 
+                "price": float(query_params.get("price", ["0"])[0]) if query_params.get("price", ["0"])[0] != "0" else None
+            }
+            
+            st.json(webhook_data)
+            
+            # Binance order işlemini simüle et
+            st.success("✅ Webhook işlendi! (Simülasyon)")
+            st.info("💡 Gerçek webhook için POST request kullanın")
+            
+            # Normal UI'yi gösterme
+            st.stop()
+            
+    except Exception as e:
+        st.error(f"Webhook hatası: {e}")
+        st.stop()
+
+# Webhook handler'ı çalıştır
+handle_webhook()
 
 # Bu uygulama mevcut FastAPI backend'inizi kullanır.
 # .env dosyasındaki PORT ve base URL'lere göre otomatik bağlanır.
@@ -484,5 +524,7 @@ st.caption(f"Backend: {BASE_URL} | Health: {'OK' if backend_alive() else 'UNREAC
 # Webhook URL bilgisi
 st.sidebar.markdown("---")
 st.sidebar.markdown("### 🔗 Webhook URL")
-st.sidebar.code("https://binance-api-app.onrender.com:8000/webhook/tradingview")
-st.sidebar.caption("⚠️ Webhook URL'si FastAPI portunda (8000)")
+st.sidebar.code("https://binance-api-app.onrender.com/?webhook=tradingview")
+st.sidebar.caption("✅ Ana domain üzerinden webhook")
+st.sidebar.markdown("**Test URL örneği:**")
+st.sidebar.code("https://binance-api-app.onrender.com/?webhook=tradingview&signal=AL&symbol=BTCUSDT&price=60000")
