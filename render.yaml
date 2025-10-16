@@ -1,11 +1,11 @@
 services:
-  # Tek Servis - Hem FastAPI Backend hem Streamlit Frontend
+  # Backend service (FastAPI, public for webhooks)
   - type: web
-    name: binance-api-app
+    name: binance-api-backend
     env: python
     plan: free
     buildCommand: pip install -r requirements.txt
-    startCommand: python start.py
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
     envVars:
       - key: BINANCE_API_KEY
         sync: false
@@ -31,9 +31,20 @@ services:
         sync: false
       - key: ENV
         value: "production"
+
+  # Frontend service (Streamlit, uses backend URL)
+  - type: web
+    name: binance-api-frontend
+    env: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: streamlit run streamlit_app.py --server.port $PORT --server.address 0.0.0.0
+    envVars:
       - key: BACKEND_URL
-        value: "http://localhost:8000"
+        value: https://binance-api-backend.onrender.com
+      - key: ENV
+        value: "production"
 
 databases:
-  # SQLite database will be handled as a file in the service
+  # SQLite database will be handled as a file in the backend service
   # For production, consider using PostgreSQL
