@@ -2,6 +2,7 @@ from fastapi import FastAPI, Request, WebSocket
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
 from fastapi.staticfiles import StaticFiles
+from fastapi.middleware.cors import CORSMiddleware
 
 from .database import init_db, SessionLocal
 from .routers import webhook
@@ -17,6 +18,15 @@ import socket
 from .services.order_sizing import get_symbol_filters, round_step
 
 app = FastAPI(title="SerdarBorsa Webhook -> Binance Futures")
+
+# CORS middleware - Frontend'in backend'e erişebilmesi için
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Render'da frontend URL'i otomatik değişebilir
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # Static and templates
 app.mount("/static", StaticFiles(directory="static"), name="static")
