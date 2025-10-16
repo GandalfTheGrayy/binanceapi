@@ -1,0 +1,178 @@
+from typing import Any, Dict, Optional, List
+import time
+import hmac
+import hashlib
+from urllib.parse import urlencode
+import httpx
+
+
+class BinanceFuturesClient:
+	def __init__(self, api_key: str, api_secret: str, base_url: str):
+		self.api_key = api_key
+		self.api_secret = api_secret  # Keep as string, encode when needed
+		self.base_url = base_url.rstrip("/")
+		self._client = httpx.Client(base_url=self.base_url, timeout=20.0)
+		self._last_request_debug = None
+		self._last_status_code: Optional[int] = None
+
+	def _headers(self) -> Dict[str, str]:
+		return {"X-MBX-APIKEY": self.api_key}
+
+	def _timestamp(self) -> int:
+		return int(time.time() * 1000)
+
+	def _sign(self, params: Dict[str, Any]) -> str:
+		query = urlencode(params, doseq=True)
+		return hmac.new(self.api_secret.encode('utf-8'), query.encode('utf-8'), hashlib.sha256).hexdigest()
+
+	def _signed_get(self, path: str, params: Optional[Dict[str, Any]] = None) -> httpx.Response:
+		params = params.copy() if params else {}
+		params.setdefault("timestamp", self._timestamp())
+		params.setdefault("recvWindow", 5000)
+		sig = self._sign(params)
+		params["signature"] = sig
+		
+		# Debug bilgilerini sakla (headerları maskele)
+		full_url = f"{self.base_url}{path}"
+		query_string = urlencode({k: v for k, v in params.items() if k != 'signature'}, doseq=True)
+		self._last_request_debug = {
+			"url": full_url,
+			"headers": {"X-MBX-APIKEY": "***"},
+			"params": {**params, "signature": "***"},
+			"signature": "***",
+			"api_secret": "***",
+			"query_string": query_string,
+			"signature_input": query_string
+		}
+		
+		resp = self._client.get(path, params=params, headers=self._headers())
+		self._last_status_code = resp.status_code
+		return resp
+
+	def _signed_post(self, path: str, params: Optional[Dict[str, Any]] = None) -> httpx.Response:
+		params = params.copy() if params else {}
+		params.setdefault("timestamp", self._timestamp())
+		params.setdefault("recvWindow", 5000)
+		sig = self._sign(params)
+		params["signature"] = sig
+		
+		# Debug bilgilerini sakla (headerları maskele)
+		full_url = f"{self.base_url}{path}"
+		query_string = urlencode({k: v for k, v in params.items() if k != 'signature'}, doseq=True)
+		self._last_request_debug = {
+			"url": full_url,
+			"headers": {"X-MBX-APIKEY": "***"},
+			"params": {**params, "signature": "***"},
+			"signature": "***",
+			"api_secret": "***",
+			"query_string": query_string,
+			"signature_input": query_string
+		}
+		
+		resp = self._client.post(path, data=params, headers=self._headers())
+		self._last_status_code = resp.status_code
+		return resp
+
+	def test_connectivity(self) -> Dict[str, Any]:
+		resp = self._client.get("/fapi/v1/ping")
+		self._last_status_code = resp.status_code
+		resp.raise_for_status()
+		return resp.json() if resp.text else {}
+
+	def exchange_info(self) -> Dict[str, Any]:
+		resp = self._client.get("/fapi/v1/exchangeInfo")
+		self._last_status_code = resp.status_code
+		resp.raise_for_status()
+		return resp.json()
+
+	def account_usdt_balances(self) -> Dict[str, float]:
+		"""Return wallet and available USDT balances for USDT-M futures."""
+		resp = self._signed_get("/fapi/v2/balance")
+		resp.raise_for_status()
+		assets = resp.json()
+		for a in assets:
+			if a.get("asset") == "USDT":
+				# walletBalance: total wallet; availableBalance: free balance
+				return {
+					"wallet": float(a.get("balance", a.get("walletBalance", 0.0))),
+					"available": float(a.get("availableBalance", 0.0)),
+				}
+		return {"wallet": 0.0, "available": 0.0}
+
+	def set_leverage(self, symbol: str, leverage: int) -> Dict[str, Any]:
+		resp = self._signed_post("/fapi/v1/leverage", {"symbol": symbol, "leverage": leverage})
+		resp.raise_for_status()
+		return resp.json()
+
+	def place_market_order(self, symbol: str, side: str, quantity: float, position_side: Optional[str] = None) -> Dict[str, Any]:
+		params: Dict[str, Any] = {
+			"symbol": symbol,
+			"side": side,
+			"type": "MARKET",
+			"quantity": f"{quantity}",
+		}
+		if position_side:
+			params["positionSide"] = position_side
+		resp = self._signed_post("/fapi/v1/order", params)
+		resp.raise_for_status()
+		return resp.json()
+
+	def positions(self, symbols: Optional[List[str]] = None) -> List[Dict[str, Any]]:
+		"""Return current positions; if symbols provided, filter accordingly."""
+		resp = self._signed_get("/fapi/v2/positionRisk")
+		resp.raise_for_status()
+		data = resp.json()
+		result: List[Dict[str, Any]] = []
+		for p in data:
+			if symbols and p.get("symbol") not in symbols:
+				continue
+			try:
+				amt = float(p.get("positionAmt", 0))
+				if abs(amt) > 0:
+					result.append(p)
+			except Exception:
+				continue
+		return result
+
+	def position_mode(self) -> Dict[str, Any]:
+		"""Return position mode info: {"dualSidePosition": bool}"""
+		resp = self._signed_get("/fapi/v1/positionSide/dual")
+		resp.raise_for_status()
+		return resp.json()
+
+	def set_position_mode(self, dual: bool) -> Dict[str, Any]:
+		"""Set position mode. dual=True => Hedge (dual-side), dual=False => One-way."""
+		# Binance expects a string 'true'/'false'
+		val = "true" if dual else "false"
+		resp = self._signed_post("/fapi/v1/positionSide/dual", {"dualSidePosition": val})
+		resp.raise_for_status()
+		return resp.json()
+
+	def position_risk(self, symbols: Optional[List[str]] = None) -> List[Dict[str, Any]]:
+		"""Return raw position risk entries (including zero positions) to read maxNotionalValue etc."""
+		resp = self._signed_get("/fapi/v2/positionRisk")
+		resp.raise_for_status()
+		data = resp.json()
+		if symbols:
+			return [p for p in data if p.get("symbol") in symbols]
+		return data
+
+	def get_last_request_debug(self) -> Optional[Dict[str, Any]]:
+		"""Son request'in debug bilgilerini döndür (maskeleme uygulanmış)"""
+		return self._last_request_debug
+
+	def get_last_status_code(self) -> Optional[int]:
+		return self._last_status_code
+
+	# Yeni: halka açık fiyat (ticker) endpointi
+	def ticker_price(self, symbol: str) -> float:
+		"""Return latest price for a symbol from /fapi/v1/ticker/price"""
+		resp = self._client.get("/fapi/v1/ticker/price", params={"symbol": symbol})
+		self._last_status_code = resp.status_code
+		resp.raise_for_status()
+		data = resp.json()
+		price_val = data.get("price")
+		try:
+			return float(price_val)
+		except Exception:
+			return 0.0

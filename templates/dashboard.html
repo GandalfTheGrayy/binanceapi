@@ -1,0 +1,4356 @@
+<!DOCTYPE html>
+<html>
+<head>
+	<meta charset="utf-8" />
+	<meta name="viewport" content="width=device-width, initial-scale=1" />
+	<title>Dashboard - SerdarBorsa</title>
+	<link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+	<div class="container">
+		<h1>Dashboard</h1>
+		<div class="grid">
+			<div class="card">
+				<h2>Webhook URL'leri</h2>
+				<ul>
+					<li>Local: <code>{{ local_base_url }}/webhook/tradingview</code></li>
+					<li>LAN: <code>{{ lan_base_url }}/webhook/tradingview</code></li>
+					<li>Public: <code>{{ public_base_url if public_base_url else '—' }}/webhook/tradingview</code></li>
+				</ul>
+				<small>TradingView alarmı için <code>/webhook/tradingview</code> endpointini kullanın.</small>
+			</div>
+			<div class="card">
+				<h2>Özet</h2>
+				{% if snapshot %}
+					<p><strong>Wallet:</strong> {{ '%.2f'|format(snapshot.total_wallet_balance) }} USDT</p>
+					<p><strong>Kullanılan Limit:</strong> {{ '%.2f'|format(snapshot.used_allocation_usd) }} USDT</p>
+					<p><strong>Müsait:</strong> {{ '%.2f'|format(snapshot.available_balance) }} USDT</p>
+					<p><strong>Whitelist:</strong> {{ whitelist|join(', ') }}</p>
+					<p><strong>Allocation %:</strong> {{ allocation_pct }}%</p>
+					<p><em>{{ snapshot.note }}</em></p>
+				{% else %}
+					<p>Henüz snapshot yok.</p>
+				{% endif %}
+			</div>
+			<div class="card">
+				<h2>Admin: Kaldıraç Ayarı</h2>
+				<form id="levForm" onsubmit="return false;">
+					<label>Policy
+						<select id="levPolicy">
+							<option value="auto">auto</option>
+							<option value="webhook">webhook</option>
+							<option value="per_symbol">per_symbol</option>
+							<option value="default">default</option>
+						</select>
+					</label>
+					<label style="margin-left:8px;">Default
+						<input id="levDefault" type="number" min="1" max="125" step="1" value="5" />
+					</label>
+					<label style="display:block;margin-top:8px;">Per Symbol (BTCUSDT:7,ETHUSDT:6)
+						<input id="levMap" type="text" placeholder="BTCUSDT:7,ETHUSDT:6" style="width:100%" />
+					</label>
+					<button id="levSave" style="margin-top:8px;">Kaydet</button>
+				</form>
+				<small>Ayarlar anında uygulanır; gerekirse /api/binance/position-mode ile One-way/Hedge değiştirilebilir.</small>
+			</div>
+
+			<div class="card">
+				<h2>Risk Ayarları</h2>
+				<form id="riskForm" onsubmit="return false;">
+					<label>Sabit Limit (USDT)
+						<input id="allocationCapUsd" type="number" min="0" step="0.01" placeholder="örn. 1000" />
+					</label>
+					<label style="margin-left:8px;">Her İşlem %
+						<input id="perTradePct" type="number" min="0" max="100" step="0.1" placeholder="örn. 10" />
+					</label>
+					<button id="riskSave" style="margin-left:8px;">Kaydet</button>
+					<button id="resetUsed" type="button" style="margin-left:8px;background:#e53935;color:#fff;">Kullanılan Limiti Sıfırla</button>
+				</form>
+				<small>Toplam kullanılan marj hiçbir zaman sabit limitinizi aşmayacak. Her yeni pozisyon, sabit limitin belirttiğiniz yüzdesi kadar marj kullanır.</small>
+			</div>
+
+			<div class="card">
+				<div style="display:flex;gap:8px;flex-wrap:wrap">
+					<button id="btnShowLev" class="test-btn" type="button">Admin Kaldıraç Ayarını Gör</button>
+					<button id="btnShowRisk" class="test-btn" type="button">Risk Ayarını Gör</button>
+					<button id="btnShowWebhooks" class="test-btn" type="button">Son 50 Webhook Detay Göster</button>
+					<button id="btnShowOrders" class="test-btn" type="button">Son 50 Emir Detay Göster</button>
+					<button id="btnShowLogs" class="test-btn" type="button">Binance API İstek/Response Logları Detay Göster</button>
+				</div>
+				<p class="small" style="margin-top:6px">Detayları ilgili popup içinde inceleyebilirsiniz.</p>
+
+				<!-- Modal Backdrop & Container -->
+				<div id="sbModalBackdrop" class="modal-backdrop" onclick="if(event.target===this) SB_closeModal()">
+					<div class="modal" role="dialog" aria-modal="true" aria-labelledby="sbModalTitle">
+						<div class="modal-header">
+							<h3 id="sbModalTitle" style="margin:0;font-size:18px"></h3>
+							<button class="modal-close" onclick="SB_closeModal()" aria-label="Kapat">×</button>
+						</div>
+						<div class="modal-body">
+							<div id="sbModalContent"></div>
+						</div>
+						<div class="modal-footer">
+							<button class="test-btn" onclick="SB_closeModal()">Kapat</button>
+						</div>
+					</div>
+				</div>
+
+				<script>
+				function SB_openModal(title, html){
+					document.getElementById('sbModalTitle').textContent = title || '';
+					document.getElementById('sbModalContent').innerHTML = html || '';
+					document.getElementById('sbModalBackdrop').classList.add('show');
+				}
+				function SB_closeModal(){
+					document.getElementById('sbModalBackdrop').classList.remove('show');
+				}
+
+				async function SB_showLev(){
+					try{
+						const r = await fetch('/api/admin/runtime');
+						const js = await r.json();
+						const html = `
+							<div>
+								<div class="label">Policy</div>
+								<div class="pre-box">${String(js.leverage_policy ?? '')}</div>
+								<div class="label">Default Leverage</div>
+								<div class="pre-box">${String(js.default_leverage ?? '')}</div>
+								<div class="label">Per Symbol</div>
+								<div class="pre-box">${js.leverage_per_symbol ? JSON.stringify(js.leverage_per_symbol, null, 2) : '-'}</div>
+							</div>`;
+						SB_openModal('Admin Kaldıraç Ayarı', html);
+					}catch(e){ SB_openModal('Admin Kaldıraç Ayarı', `<div class="pre-box">Hata: ${e}</div>`); }
+				}
+
+				async function SB_showRisk(){
+					try{
+						const r = await fetch('/api/admin/runtime');
+						const js = await r.json();
+						const html = `
+							<div>
+								<div class="label">Sabit Limit (USDT)</div>
+								<div class="pre-box">${js.allocation_cap_usd ?? 0}</div>
+								<div class="label">Her İşlem %</div>
+								<div class="pre-box">${js.per_trade_pct ?? 0}</div>
+							</div>`;
+						SB_openModal('Risk Ayarı', html);
+					}catch(e){ SB_openModal('Risk Ayarı', `<div class="pre-box">Hata: ${e}</div>`); }
+				}
+
+				async function SB_showWebhooks(){
+					try{
+						const r = await fetch('/api/webhooks?limit=50');
+						const js = await r.json();
+						const rows = js.map(w => `
+							<tr>
+								<td>${w.created_at || ''}</td>
+								<td>${w.symbol || ''}</td>
+								<td>${w.signal || ''}</td>
+								<td>${w.price ?? ''}</td>
+								<td><pre class="pre-box" style="margin:0;white-space:pre-wrap">${w.payload ? JSON.stringify(w.payload, null, 2) : ''}</pre></td>
+							</tr>
+						`).join('');
+						const html = `
+							<div class="table-scroll">
+								<table>
+									<thead><tr><th>Zaman</th><th>Symbol</th><th>Sinyal</th><th>Fiyat</th><th>Payload</th></tr></thead>
+									<tbody>${rows}</tbody>
+								</table>
+							</div>`;
+						SB_openModal('Son 50 Webhook Detayı', html);
+					}catch(e){ SB_openModal('Son 50 Webhook Detayı', `<div class="pre-box">Hata: ${e}</div>`); }
+				}
+
+				async function SB_showOrders(){
+					try{
+						const r = await fetch('/api/orders?limit=50');
+						const js = await r.json();
+						const rows = js.map(o => `
+							<tr>
+								<td>${o.created_at || ''}</td>
+								<td>${o.symbol || ''}</td>
+								<td>${o.side || ''}</td>
+								<td>${o.leverage ?? ''}</td>
+								<td>${o.qty ?? ''}</td>
+								<td>${o.price ?? ''}</td>
+								<td>${o.status || ''}</td>
+								<td><pre class="pre-box" style="margin:0;white-space:pre-wrap">${o.response ? JSON.stringify(o.response, null, 2) : ''}</pre></td>
+							</tr>
+						`).join('');
+						const html = `
+							<div class="table-scroll">
+								<table>
+									<thead><tr><th>Zaman</th><th>Symbol</th><th>Yön</th><th>Kaldıraç</th><th>Qty</th><th>Fiyat</th><th>Durum</th><th>Response</th></tr></thead>
+									<tbody>${rows}</tbody>
+								</table>
+							</div>`;
+						SB_openModal('Son 50 Emir Detayı', html);
+					}catch(e){ SB_openModal('Son 50 Emir Detayı', `<div class="pre-box">Hata: ${e}</div>`); }
+				}
+
+				async function SB_showLogs(){
+					try{
+						const r = await fetch('/api/logs?limit=50');
+						const js = await r.json();
+						const rows = js.map(l => `
+							<tr>
+								<td>${l.created_at || ''}</td>
+								<td>${l.method || ''}</td>
+								<td>${l.path || ''}</td>
+								<td>${l.status_code ?? ''}</td>
+								<td><pre class=\"pre-box\" style=\"margin:0;white-space:pre-wrap\">${l.request_params ? JSON.stringify(l.request_params, null, 2) : ''}</pre></td>
+								<td><pre class=\"pre-box\" style=\"margin:0;white-space:pre-wrap\">${l.error ? ('❌ ' + l.error) : (l.response ? JSON.stringify(l.response, null, 2) : '')}</pre></td>
+							</tr>
+						`).join('');
+						const html = `
+							<div class="table-scroll">
+								<table>
+									<thead><tr><th>Zaman</th><th>Method</th><th>Path</th><th>Status</th><th>İstek</th><th>Cevap/Hata</th></tr></thead>
+									<tbody>${rows}</tbody>
+								</table>
+							</div>`;
+						SB_openModal('Binance API İstek/Response Logları', html);
+					}catch(e){ SB_openModal('Binance API İstek/Response Logları', `<div class="pre-box">Hata: ${e}</div>`); }
+				}
+
+				document.getElementById('btnShowLev')?.addEventListener('click', SB_showLev);
+				document.getElementById('btnShowRisk')?.addEventListener('click', SB_showRisk);
+				document.getElementById('btnShowWebhooks')?.addEventListener('click', SB_showWebhooks);
+				document.getElementById('btnShowOrders')?.addEventListener('click', SB_showOrders);
+				document.getElementById('btnShowLogs')?.addEventListener('click', SB_showLogs);
+				</script>
+			</div>
+
+			<div class="card">
+				<h2>Aktif Pozisyonlar</h2>
+				{% if positions and positions|length > 0 %}
+				<table>
+					<thead>
+						<tr><th>Symbol</th><th>Amt</th><th>Entry</th><th>Mark</th><th>UPnL</th><th>Lev</th></tr>
+					</thead>
+					<tbody id="positionsTbody">
+						{% for p in positions %}
+						<tr>
+							<td>{{ p.symbol }}</td>
+							<td>{{ p.positionAmt }}</td>
+							<td>{{ p.entryPrice }}</td>
+							<td>{{ p.markPrice }}</td>
+							<td>{{ p.unRealizedProfit }}</td>
+							<td>{{ p.leverage }}</td>
+						</tr>
+						{% endfor %}
+					</tbody>
+				</table>
+				{% else %}
+				<p>Pozisyon yok veya DRY_RUN etkin.</p>
+				{% endif %}
+			</div>
+			<div class="card">
+				<h2>Binance API Test</h2>
+				<div style="margin-bottom: 15px;">
+					<button id="testConnectivity" class="test-btn">Bağlantı Testi</button>
+					<button id="testAccount" class="test-btn">Hesap Bilgileri</button>
+					<button id="testPositions" class="test-btn">Pozisyonlar</button>
+				</div>
+				<div id="testResults" style="background: #f5f5f5; padding: 10px; border-radius: 4px; min-height: 100px; font-family: monospace; font-size: 12px; white-space: pre-wrap; overflow-x: auto;">Test sonuçları burada görünecek...</div>
+			</div>
+			<div class="card">
+				<h2>Son 50 Webhook</h2>
+				<table>
+					<thead>
+						<tr><th>Zaman</th><th>Symbol</th><th>Sinyal</th><th>Fiyat</th><th>Payload</th></tr>
+					</thead>
+					<tbody id="webhooksTbody">
+						{% for w in webhooks %}
+						<tr>
+							<td>{{ w.created_at }}</td>
+							<td>{{ w.symbol }}</td>
+							<td>{{ w.signal }}</td>
+							<td>{{ w.price }}</td>
+							<td><a href="/webhook/event/{{ w.id }}" target="_blank">Gör</a></td>
+						</tr>
+						{% endfor %}
+					</tbody>
+				</table>
+			</div>
+			<div class="card">
+				<h2>Son 50 Emir</h2>
+				<table>
+					<thead>
+						<tr><th>Zaman</th><th>Symbol</th><th>Yön</th><th>Lev</th><th>Qty</th><th>Fiyat</th><th>Durum</th></tr>
+					</thead>
+					<tbody id="ordersTbody">
+						{% for o in orders %}
+						<tr>
+							<td>{{ o.created_at }}</td>
+							<td>{{ o.symbol }}</td>
+							<td>{{ o.side }}</td>
+							<td>{{ o.leverage }}</td>
+							<td>{{ o.qty }}</td>
+							<td>{{ o.price }}</td>
+							<td>{{ o.status }}</td>
+						</tr>
+						{% endfor %}
+					</tbody>
+				</table>
+			</div>
+
+			<div class="card">
+				<h2>Binance API İstek/Response Logları</h2>
+				<table>
+					<thead>
+						<tr><th>Zaman</th><th>Method</th><th>Path</th><th>Status</th><th>İstek</th><th>Cevap/Hata</th></tr>
+					</thead>
+					<tbody id="logsTbody">
+						<tr><td colspan="6">Yükleniyor...</td></tr>
+					</tbody>
+				</table>
+			</div>
+		</div>
+	</div>
+	<script>
+	// Kaldıraç formu
+	document.getElementById('levSave').addEventListener('click', async ()=>{
+		const policy = document.getElementById('levPolicy').value;
+		const defLev = parseInt(document.getElementById('levDefault').value || '0');
+		const mapStr = document.getElementById('levMap').value || '';
+		await fetch('/api/admin/runtime',{
+			method:'POST',headers:{'content-type':'application/json'},
+			body: JSON.stringify({ leverage_policy: policy, default_leverage: defLev, leverage_per_symbol_str: mapStr })
+		});
+		alert('Kaldıraç ayarları güncellendi');
+	});
+
+	// Risk formu
+	(function initRiskForm(){
+		fetch('/api/admin/runtime')
+			.then(r => r.json())
+			.then(rt => {
+				const capEl = document.getElementById('allocationCapUsd');
+				const pctEl = document.getElementById('perTradePct');
+				if(capEl) capEl.value = rt.allocation_cap_usd ?? '';
+				if(pctEl) pctEl.value = rt.per_trade_pct ?? 10;
+			})
+			.catch(() => {});
+	})();
+	document.getElementById('riskSave').addEventListener('click', async ()=>{
+		const cap = document.getElementById('allocationCapUsd').value;
+		const pct = document.getElementById('perTradePct').value;
+		await fetch('/api/admin/runtime',{
+			method:'POST',headers:{'content-type':'application/json'},
+			body: JSON.stringify({ allocation_cap_usd: cap ? Number(cap) : 0, per_trade_pct: pct ? Number(pct) : 10 })
+		});
+		alert('Risk ayarları güncellendi');
+	});
+
+	// Kullanılan limiti sıfırla
+	document.getElementById('resetUsed').addEventListener('click', async ()=>{
+		if(!confirm("Used allocation'ı 0'a çekmek istediğinize emin misiniz?")) return;
+		try{
+			const resp = await fetch('/api/admin/reset-used', { method: 'POST' });
+			const data = await resp.json();
+			if(data && data.ok){
+				alert("✅ " + data.message);
+				location.reload();
+			}else{
+				alert("❌ İşlem başarısız: " + (data && data.error ? data.error : 'Bilinmeyen hata'));
+			}
+		}catch(e){
+			alert("❌ Ağ hatası: " + e.message);
+		}
+	});
+
+	// Binance API Test Functions
+	async function testBinanceAPI(endpoint, buttonId) {
+		const button = document.getElementById(buttonId);
+		const resultsDiv = document.getElementById('testResults');
+		
+		button.disabled = true;
+		button.textContent = 'Test ediliyor...';
+		resultsDiv.textContent = 'İstek gönderiliyor...';
+		
+		try {
+			const response = await fetch(endpoint);
+			const data = await response.json();
+			
+			let resultText = '';
+			
+			if (data.success) {
+				resultText = `✅ ${data.message}\n\n`;
+				if (data.debug_info) {
+					resultText += `🔍 DEBUG BİLGİLERİ:\n`;
+					resultText += `Request URL: ${data.debug_info.url}\n`;
+					resultText += `Request Headers: ${JSON.stringify(data.debug_info.headers, null, 2)}\n`;
+					resultText += `Request Params: ${JSON.stringify(data.debug_info.params, null, 2)}\n\n`;
+				}
+				resultText += `📊 RESPONSE DATA:\n` + JSON.stringify(data.data, null, 2);
+				resultsDiv.style.background = '#e8f5e8';
+			} else {
+				resultText = `❌ Hata: ${data.error}\n\n`;
+				if (data.debug_info) {
+					resultText += `🔍 DEBUG BİLGİLERİ:\n`;
+					resultText += `Request URL: ${data.debug_info.url}\n`;
+					resultText += `Request Headers: ${JSON.stringify(data.debug_info.headers, null, 2)}\n`;
+					resultText += `Request Params: ${JSON.stringify(data.debug_info.params, null, 2)}\n`;
+					resultText += `Signature: ${data.debug_info.signature}\n`;
+				}
+				resultsDiv.style.background = '#ffe8e8';
+			}
+			
+			resultsDiv.textContent = resultText;
+		} catch (error) {
+			resultsDiv.textContent = `❌ Network Hatası: ${error.message}`;
+			resultsDiv.style.background = '#ffe8e8';
+		} finally {
+			button.disabled = false;
+			switch(buttonId) {
+				case 'testConnectivity': button.textContent = 'Bağlantı Testi'; break;
+				case 'testAccount': button.textContent = 'Hesap Bilgileri'; break;
+				case 'testPositions': button.textContent = 'Pozisyonlar'; break;
+			}
+		}
+	}
+	
+	document.getElementById('testConnectivity').addEventListener('click', () => {
+		testBinanceAPI('/api/binance/test-connectivity', 'testConnectivity');
+	});
+	
+	document.getElementById('testAccount').addEventListener('click', () => {
+		testBinanceAPI('/api/binance/account', 'testAccount');
+	});
+	
+	document.getElementById('testPositions').addEventListener('click', () => {
+		testBinanceAPI('/api/binance/positions', 'testPositions');
+	});
+
+	// WebSocket ile canlı güncelle
+	(function(){
+		let wsUrl = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws';
+		const ws = new WebSocket(wsUrl);
+		ws.onmessage = (ev)=>{
+			try{
+				const msg = JSON.parse(ev.data);
+				if(msg.type === 'webhook_event'){
+					const tbody = document.getElementById('webhooksTbody');
+					const tr = document.createElement('tr');
+					tr.innerHTML = `<td>${msg.data.created_at}</td><td>${msg.data.symbol}</td><td>${msg.data.signal}</td><td>${msg.data.price ?? ''}</td><td><a href="/webhook/event/${msg.data.id}" target="_blank">Gör</a></td>`;
+					tbody.prepend(tr);
+				}
+			}catch(e){}
+		};
+	})();
+
+	// Logları çek
+	async function loadLogs(){
+		try{
+			const r = await fetch('/api/logs?limit=50');
+			const js = await r.json();
+			const tbody = document.getElementById('logsTbody');
+			tbody.innerHTML = '';
+			js.forEach(l => {
+				const tr = document.createElement('tr');
+				const req = l.request_params ? JSON.stringify(l.request_params) : '';
+				const resp = l.error ? ('❌ ' + l.error) : (l.response ? JSON.stringify(l.response).slice(0, 300) : '');
+				tr.innerHTML = `<td>${l.created_at}</td><td>${l.method}</td><td>${l.path}</td><td>${l.status_code ?? ''}</td><td style="max-width:300px;overflow:auto;">${req}</td><td style="max-width:300px;overflow:auto;">${resp}</td>`;
+				tbody.appendChild(tr);
+			});
+		}catch(e){
+			const tbody = document.getElementById('logsTbody');
+			tbody.innerHTML = `<tr><td colspan="6">Loglar yüklenemedi: ${e}</td></tr>`;
+		}
+	}
+	loadLogs();
+	</script>
+<div class="card">
+  <h2>Webhook Simülatörü</h2>
+  <form id="simForm">
+    <label>Sembol</label>
+    <input id="simSymbol" placeholder="BTCUSDT" required />
+    <label>Sinyal</label>
+    <select id="simSignal">
+      <option value="AL">AL (Long)</option>
+      <option value="SAT">SAT (Short)</option>
+    </select>
+    <label>Fiyat</label>
+    <input id="simPrice" type="number" step="0.0001" placeholder="65000" required />
+    <label>Kaldıraç (opsiyonel)</label>
+    <input id="simLev" type="number" step="1" placeholder="10" />
+    <button type="submit">Simüle Et</button>
+    <button type="button" id="execBtn" class="btn btn-danger" style="margin-left:8px;">Gerçekten Gönder</button>
+  </form>
+  <h6 class="mt-3">Simülasyon Sonucu</h6>
+  <pre id="simResult" style="margin-top:8px; white-space:pre-wrap"></pre>
+  <h6 class="mt-3">Gerçek Emir Sonucu</h6>
+  <pre id="execResult" style="margin-top:8px; white-space:pre-wrap"></pre>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+<script>
+const simForm = document.getElementById('simForm');
+if (simForm) {
+  simForm.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const payload = {
+      symbol: document.getElementById('simSymbol').value.trim(),
+      signal: document.getElementById('simSignal').value,
+      price: parseFloat(document.getElementById('simPrice').value),
+    };
+    const lev = document.getElementById('simLev').value;
+    if (lev) payload.leverage = parseInt(lev, 10);
+
+    const res = await fetch('/webhook/simulate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      document.getElementById('simResult').textContent = 'Hata: ' + (data.detail || 'Bilinmeyen hata');
+      return;
+    }
+    const lines = [];
+    lines.push(`Symbol: ${data.symbol}`);
+    lines.push(`Side: ${data.side}`);
+    lines.push(`Price: ${data.price}`);
+    lines.push(`Leverage: ${data.leverage}`);
+    lines.push(`Per Trade %: ${data.per_trade_pct}`);
+    lines.push(`Allocation Cap: ${data.allocation_cap_usd}`);
+    lines.push(`Used Allocation: ${data.used_allocation_usd}`);
+    lines.push(`Qty (Yeni pozisyon hedefi): ${data.qty}`);
+    lines.push(`Flip Offset (Önce kapanacak miktar): ${data.flip_offset}`);
+    lines.push(`Order Qty (Toplam emir): ${data.order_qty}`);
+    lines.push(`Margin USD: ${data.margin_usd}`);
+    lines.push(`Notional USD: ${data.notional_usd}`);
+    lines.push('Binance Çağrıları:');
+    for (const c of (data.binance_calls || [])) {
+      const p = c.params ? ' ' + JSON.stringify(c.params) : '';
+      lines.push(`  - ${c.method} ${c.path} (${c.when})${p}`);
+    }
+    document.getElementById('simResult').textContent = lines.join('\n');
+  });
+}
+
+const execBtn = document.getElementById('execBtn');
+if (execBtn) {
+  execBtn.addEventListener('click', async () => {
+    const symbol = document.getElementById('simSymbol').value.trim();
+    const signal = document.getElementById('simSignal').value;
+    const priceStr = document.getElementById('simPrice').value;
+    const out = document.getElementById('execResult');
+
+    if (!priceStr) {
+      out.textContent = 'Hata: Fiyat zorunlu.';
+      return;
+    }
+
+    const payload = {
+      symbol,
+      signal,
+      price: parseFloat(priceStr),
+    };
+    const lev = document.getElementById('simLev').value;
+    if (lev) payload.leverage = parseInt(lev, 10);
+
+    out.textContent = 'Emir gönderiliyor...';
+    try {
+      const res = await fetch('/webhook/tradingview', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail || 'Bilinmeyen hata');
+      // Yalnızca Binance response’unu yazdır
+      out.textContent = JSON.stringify((data && data.response) ? data.response : data, null, 2);
+    } catch (err) {
+      out.textContent = 'Hata: ' + err.message;
+    }
+  });
+}
+</script>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>

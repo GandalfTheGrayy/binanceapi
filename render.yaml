@@ -1,0 +1,56 @@
+services:
+  # FastAPI Backend Service
+  - type: web
+    name: binance-api-backend
+    env: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python -m uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: BINANCE_API_KEY
+        sync: false
+      - key: BINANCE_API_SECRET
+        sync: false
+      - key: BINANCE_BASE_URL
+        value: https://testnet.binancefuture.com
+      - key: ALLOCATION_PCT
+        value: "10"
+      - key: DEFAULT_LEVERAGE
+        value: "10"
+      - key: PER_TRADE_PCT
+        value: "5"
+      - key: SYMBOLS_WHITELIST
+        value: "BTCUSDT,ETHUSDT,ADAUSDT,SOLUSDT"
+      - key: DRY_RUN
+        value: "true"
+      - key: LEVERAGE_POLICY
+        value: "fixed"
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: TELEGRAM_CHAT_ID
+        sync: false
+      - key: ENV
+        value: "production"
+      - key: PUBLIC_BASE_URL
+        fromService:
+          type: web
+          name: binance-api-backend
+          property: host
+
+  # Streamlit Frontend Service
+  - type: web
+    name: binance-api-frontend
+    env: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: streamlit run streamlit_app.py --server.port $PORT --server.address 0.0.0.0
+    envVars:
+      - key: BACKEND_URL
+        fromService:
+          type: web
+          name: binance-api-backend
+          property: host
+
+databases:
+  # SQLite database will be handled as a file in the service
+  # For production, consider using PostgreSQL
