@@ -10,39 +10,41 @@ import os
 import subprocess
 import sys
 
-def start_backend():
-    """FastAPI backend'i localhost:8000 üzerinde başlat"""
-    port = os.getenv("BACKEND_PORT", "8000")
-    print(f"🧠 FastAPI backend başlatılıyor - Port: {port}")
+def start_streamlit_bg():
+    """Streamlit frontend'i iç portta arka planda başlat"""
+    s_port = os.getenv("STREAMLIT_PORT", "8501")
+    # FastAPI uygulamasına iç URL'yi bildir
+    os.environ["STREAMLIT_INTERNAL_URL"] = f"http://127.0.0.1:{s_port}"
+    print(f"🎨 Streamlit (internal) başlatılıyor - Port: {s_port}")
     return subprocess.Popen([
+        "streamlit",
+        "run",
+        "streamlit_app.py",
+        "--server.port", s_port,
+        "--server.address", "127.0.0.1",
+    ])
+
+def start_backend_foreground():
+    """FastAPI backend'i public PORT üzerinde başlat (uvicorn)"""
+    port = os.getenv("PORT", "8000")
+    print(f"🧠 FastAPI backend (public) başlatılıyor - Port: {port}")
+    subprocess.run([
         sys.executable,
         "-m",
         "uvicorn",
         "app.main:app",
-        "--host", "127.0.0.1",
+        "--host", "0.0.0.0",
         "--port", port,
     ])
 
-def start_streamlit():
-    """Streamlit frontend'i ana portta başlat (webhook handling dahil)"""
-    port = os.getenv("PORT", "8501")  # Render'da PORT env var, lokal 8501
-    print(f"🎨 Streamlit (webhook dahil) başlatılıyor - Port: {port}")
-    subprocess.run([
-        "streamlit", 
-        "run", 
-        "streamlit_app.py", 
-        "--server.port", port,
-        "--server.address", "0.0.0.0"
-    ])
-
 if __name__ == "__main__":
-    print("🚀 Binance Futures Bot başlatılıyor (FastAPI + Streamlit)...")
-    backend_proc = start_backend()
+    print("🚀 Binance Futures Bot başlatılıyor (FastAPI public + Streamlit internal)...")
+    streamlit_proc = start_streamlit_bg()
     try:
-        start_streamlit()
+        start_backend_foreground()
     finally:
-        # Streamlit kapandığında backend’i de sonlandır
+        # Backend kapandığında Streamlit’i de sonlandır
         try:
-            backend_proc.terminate()
+            streamlit_proc.terminate()
         except Exception:
             pass

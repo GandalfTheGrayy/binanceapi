@@ -1,5 +1,5 @@
-from fastapi import FastAPI, Request, WebSocket
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi import FastAPI, Request, WebSocket, HTTPException
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 from fastapi.templating import Jinja2Templates
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
@@ -16,6 +16,8 @@ from .state import runtime
 from .services.ws_manager import ws_manager
 import socket
 from .services.order_sizing import get_symbol_filters, round_step
+import os
+import httpx
 
 app = FastAPI(title="SerdarBorsa Webhook -> Binance Futures")
 
@@ -205,10 +207,27 @@ def on_shutdown():
 	if scheduler:
 		scheduler.shutdown(wait=False)
 
+# Streamlit proxy — tek servis altında UI'yı aynı domain üzerinden sunmak için
+STREAMLIT_INTERNAL_URL = os.getenv("STREAMLIT_INTERNAL_URL", "http://127.0.0.1:8501").rstrip("/")
+
+async def _proxy_streamlit(path: str, request: Request) -> Response:
+    url = f"{STREAMLIT_INTERNAL_URL}/{path}" if path else STREAMLIT_INTERNAL_URL
+    # İstek gövdesini ve header'larını forward et
+    body = await request.body()
+    async with httpx.AsyncClient(follow_redirects=True) as client:
+        resp = await client.request(request.method, url, content=body, headers=dict(request.headers))
+    # Hop-by-hop header'ları çıkar
+    excluded = {"transfer-encoding", "content-encoding", "connection"}
+    headers = {k: v for k, v in resp.headers.items() if k.lower() not in excluded}
+    # Content-Type'ı koru
+    media_type = resp.headers.get("content-type")
+    return Response(content=resp.content, status_code=resp.status_code, headers=headers, media_type=media_type)
+
 
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request):
-	return templates.TemplateResponse("index.html", {"request": request})
+    # Ana sayfayı Streamlit'e proxy'le
+    return await _proxy_streamlit("", request)
 
 
 @app.get("/dashboard", response_class=HTMLResponse)
@@ -247,6 +266,11 @@ async def dashboard(request: Request):
 	finally:
 		db.close()
 
+# Catch-all proxy: bilinmeyen yolları Streamlit'e yönlendir
+@app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"])
+async def proxy_all(path: str, request: Request):
+    # Backend'in açık yolları öncelikle eşleşecektir; geriye kalan her şeyi UI'ya aktar
+    return await _proxy_streamlit(path, request)
 
 @app.get("/api/snapshots")
 async def api_snapshots(limit: int = 200):
