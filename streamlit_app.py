@@ -8,6 +8,9 @@ from dotenv import load_dotenv
 import sys
 from urllib.parse import parse_qs
 
+# Streamlit config en başta olmalı
+st.set_page_config(page_title="Binance Futures Bot", page_icon="📈", layout="wide")
+
 # .env yükle
 load_dotenv()
 
@@ -18,19 +21,19 @@ load_dotenv()
 def handle_webhook():
     """TradingView webhook'unu handle et"""
     try:
-        # URL parametrelerini kontrol et
-        query_params = st.experimental_get_query_params()
+        # URL parametrelerini kontrol et (yeni API kullan)
+        query_params = st.query_params
         
         # Webhook endpoint kontrolü
-        if "webhook" in query_params and query_params["webhook"][0] == "tradingview":
+        if "webhook" in query_params and query_params["webhook"] == "tradingview":
             st.write("🔔 **TradingView Webhook Alındı**")
             
             # Webhook body'sini simüle et (gerçek webhook'ta POST body gelir)
             # Streamlit'te POST body'yi direkt alamayız, bu yüzden query params kullanıyoruz
             webhook_data = {
-                "signal": query_params.get("signal", ["AL"])[0],
-                "symbol": query_params.get("symbol", ["BTCUSDT"])[0], 
-                "price": float(query_params.get("price", ["0"])[0]) if query_params.get("price", ["0"])[0] != "0" else None
+                "signal": query_params.get("signal", "AL"),
+                "symbol": query_params.get("symbol", "BTCUSDT"), 
+                "price": float(query_params.get("price", "0")) if query_params.get("price", "0") != "0" else None
             }
             
             st.json(webhook_data)
@@ -61,8 +64,6 @@ BASE_URL = (BACKEND_URL if BACKEND_URL else os.getenv("FRONTEND_BACKEND_URL", DE
 
 # HTTP timeout to avoid UI freeze on unreachable backend
 TIMEOUT = float(os.getenv("FRONTEND_HTTP_TIMEOUT", "5"))
-
-st.set_page_config(page_title="Binance Futures Bot", page_icon="📈", layout="wide")
 
 # Global tema ve stil (daha modern görünüm için)
 st.markdown(
