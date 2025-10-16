@@ -18,6 +18,8 @@ import socket
 from .services.order_sizing import get_symbol_filters, round_step
 import os
 import httpx
+import asyncio
+import websockets
 
 app = FastAPI(title="SerdarBorsa Webhook -> Binance Futures")
 
@@ -271,6 +273,83 @@ async def dashboard(request: Request):
 async def proxy_all(path: str, request: Request):
     # Backend'in açık yolları öncelikle eşleşecektir; geriye kalan her şeyi UI'ya aktar
     return await _proxy_streamlit(path, request)
+
+
+# WebSocket köprüsü: Streamlit'in `/_stcore/stream` kanalını iç porttan dışa aktar
+def _ws_internal_url(path: str, query: str = "") -> str:
+    base = STREAMLIT_INTERNAL_URL
+    if base.startswith("https"):
+        scheme = "wss"
+    else:
+        scheme = "ws"
+    url = f"{scheme}://{base.split('://', 1)[1]}/{path.lstrip('/')}"
+    if query:
+        url += f"?{query}"
+    return url
+
+
+@app.websocket("/_stcore/stream")
+async def proxy_streamlit_ws(websocket: WebSocket):
+    # İstemci bağlantısını kabul et
+    await websocket.accept()
+    upstream_url = _ws_internal_url("/_stcore/stream", query=str(websocket.url.query or ""))
+
+    # İstemciden gelen Cookie ve Origin bilgilerini upstream'e ilet
+    cookie = websocket.headers.get("cookie")
+    origin = None
+    host = websocket.headers.get("host")
+    # Origin'i public host üzerinden ayarla (Streamlit genelde Origin kontrolü yapmıyor ama güvenli)
+    if host:
+        # Not: Render tarafında https olabilir; origin zorunlu değil, bu yüzden None bırakmak daha güvenli olabilir
+        origin = None
+
+    extra_headers = []
+    if cookie:
+        extra_headers.append(("Cookie", cookie))
+
+    try:
+        async with websockets.connect(upstream_url, extra_headers=extra_headers, origin=origin) as upstream:
+            async def client_to_upstream():
+                try:
+                    while True:
+                        msg = await websocket.receive()
+                        if msg.get("type") == "websocket.close":
+                            try:
+                                await upstream.close()
+                            except Exception:
+                                pass
+                            break
+                        data_text = msg.get("text")
+                        data_bytes = msg.get("bytes")
+                        if data_text is not None:
+                            await upstream.send(data_text)
+                        elif data_bytes is not None:
+                            await upstream.send(data_bytes)
+                except Exception:
+                    # Bağlantı kesildi
+                    pass
+
+            async def upstream_to_client():
+                try:
+                    while True:
+                        data = await upstream.recv()
+                        if isinstance(data, (bytes, bytearray)):
+                            await websocket.send_bytes(data)
+                        else:
+                            await websocket.send_text(str(data))
+                except Exception:
+                    # Upstream kapandı
+                    pass
+
+            t1 = asyncio.create_task(client_to_upstream())
+            t2 = asyncio.create_task(upstream_to_client())
+            await asyncio.wait({t1, t2}, return_when=asyncio.FIRST_COMPLETED)
+    except Exception:
+        # Upstream bağlantı kurulamadı ise 403 ile kapat
+        try:
+            await websocket.close(code=1008)
+        except Exception:
+            pass
 
 @app.get("/api/snapshots")
 async def api_snapshots(limit: int = 200):
