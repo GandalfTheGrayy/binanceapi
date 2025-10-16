@@ -13,15 +13,8 @@ load_dotenv()
 # .env dosyasındaki PORT ve base URL'lere göre otomatik bağlanır.
 # Render deployment için BACKEND_URL environment variable'ını kullanır.
 
-# Render'da FastAPI ana portta çalışıyor, Streamlit 8501'de
-# Lokal: FastAPI 8000, Streamlit 8501
-# Render: FastAPI $PORT (ana), Streamlit 8501 (internal)
-if os.getenv("RENDER"):
-    # Render'da: FastAPI ana portta, Streamlit internal
-    DEFAULT_BASE = f"http://127.0.0.1:{os.getenv('PORT', '8000')}"
-else:
-    # Lokal: FastAPI 8000, Streamlit 8501
-    DEFAULT_BASE = "http://127.0.0.1:8000"
+# Render'da BACKEND_URL environment variable'ı backend service'den otomatik gelir
+DEFAULT_BASE = "http://127.0.0.1:8000"
 
 BACKEND_URL = os.getenv("BACKEND_URL")  # Render'dan gelen backend URL
 BASE_URL = (BACKEND_URL if BACKEND_URL else os.getenv("FRONTEND_BACKEND_URL", DEFAULT_BASE)).rstrip("/")
@@ -487,3 +480,9 @@ with sec_simulator:
             st.info("Anlık fiyat alınamadı veya henüz hesaplama yapılamadı.")
 
 st.caption(f"Backend: {BASE_URL} | Health: {'OK' if backend_alive() else 'UNREACHABLE'}")
+
+# Webhook URL bilgisi
+st.sidebar.markdown("---")
+st.sidebar.markdown("### 🔗 Webhook URL")
+st.sidebar.code("https://binance-api-app.onrender.com:8000/webhook/tradingview")
+st.sidebar.caption("⚠️ Webhook URL'si FastAPI portunda (8000)")
