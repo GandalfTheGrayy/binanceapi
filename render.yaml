@@ -1,11 +1,11 @@
 services:
-  # FastAPI Backend Service
+  # Tek Servis - Hem FastAPI Backend hem Streamlit Frontend
   - type: web
-    name: binance-api-backend
+    name: binance-api-app
     env: python
     plan: free
     buildCommand: pip install -r requirements.txt
-    startCommand: python -m uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    startCommand: python start.py
     envVars:
       - key: BINANCE_API_KEY
         sync: false
@@ -31,25 +31,8 @@ services:
         sync: false
       - key: ENV
         value: "production"
-      - key: PUBLIC_BASE_URL
-        fromService:
-          type: web
-          name: binance-api-backend
-          property: host
-
-  # Streamlit Frontend Service
-  - type: web
-    name: binance-api-frontend
-    env: python
-    plan: free
-    buildCommand: pip install -r requirements.txt
-    startCommand: streamlit run streamlit_app.py --server.port $PORT --server.address 0.0.0.0
-    envVars:
       - key: BACKEND_URL
-        fromService:
-          type: web
-          name: binance-api-backend
-          property: host
+        value: "http://localhost:8000"
 
 databases:
   # SQLite database will be handled as a file in the service
