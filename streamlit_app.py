@@ -146,16 +146,36 @@ def get_json(path: str) -> Any:
 def post_json(path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
     try:
         r = requests.post(f"{BASE_URL}{path}", json=payload, timeout=TIMEOUT)
-        r.raise_for_status()
+        content_type = r.headers.get("content-type")
+        body = None
         try:
-            return r.json()
+            body = r.json()
         except Exception:
+            body = None
+        ok = 200 <= r.status_code < 300
+        if ok:
+            # Backend genelde {"success": True, ...} döner; onu aynen ilet
+            if isinstance(body, dict):
+                return body
             return {
-                "success": False,
+                "success": True,
                 "status": r.status_code,
-                "content_type": r.headers.get("content-type"),
-                "raw": (r.text or "")[:1000],
+                "content_type": content_type,
+                "response": body if body is not None else (r.text or "")[:1000],
             }
+        # Hata: ayrıntıyı (detail/error) çıkar ve döndür
+        error_msg = ""
+        if isinstance(body, dict):
+            error_msg = str(body.get("detail") or body.get("error") or "")
+        if not error_msg:
+            error_msg = (r.text or "")[:1000]
+        return {
+            "success": False,
+            "status": r.status_code,
+            "error": error_msg,
+            "content_type": content_type,
+            "response": body if body is not None else None,
+        }
     except Exception as e:
         st.error(f"POST {path} hata: {e}")
         return {"success": False, "error": str(e)}

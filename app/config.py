@@ -33,7 +33,8 @@ class Settings(BaseSettings):
 	def get_symbols_whitelist(self) -> List[str]:
 		val = (self.symbols_whitelist_raw or "").strip()
 		if not val:
-			return []
+			# Frontend defaults allow BTCUSDT and ETHUSDT; keep backend consistent
+			return ["BTCUSDT", "ETHUSDT"]
 		# try json first
 		try:
 			loaded = json.loads(val)
