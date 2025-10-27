@@ -283,11 +283,7 @@ async def dashboard(request: Request):
     finally:
         db.close()
 
-# Catch-all proxy: bilinmeyen yolları Streamlit'e yönlendir
-@app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"])
-async def proxy_all(path: str, request: Request):
-    # Backend'in açık yolları öncelikle eşleşecektir; geriye kalan her şeyi UI'ya aktar
-    return await _proxy_streamlit(path, request)
+# (Moved below) Catch-all proxy route is defined at the end of file
 
 
 # WebSocket köprüsü: Streamlit'in `/_stcore/stream` kanalını iç porttan dışa aktar
@@ -700,3 +696,9 @@ async def create_binance_order(payload: schemas.TradingViewWebhook):
 @app.get("/api/debug/routes")
 async def debug_routes():
     return [getattr(r, "path", None) for r in app.routes]
+
+# Catch-all proxy: bilinmeyen yolları Streamlit'e yönlendir (dosyanın sonunda tanımlı)
+@app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"])
+async def proxy_all(path: str, request: Request):
+    # Backend'in açık yolları öncelikle eşleşecektir; geriye kalan her şeyi UI'ya aktar
+    return await _proxy_streamlit(path, request)
