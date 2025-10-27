@@ -128,17 +128,34 @@ def get_json(path: str) -> Any:
     try:
         r = requests.get(f"{BASE_URL}{path}", timeout=TIMEOUT)
         r.raise_for_status()
-        return r.json()
+        try:
+            return r.json()
+        except Exception:
+            # JSON parse edilemedi — ham yanıtı döndür
+            return {
+                "success": False,
+                "status": r.status_code,
+                "content_type": r.headers.get("content-type"),
+                "raw": (r.text or "")[:1000],
+            }
     except Exception as e:
         st.error(f"GET {path} hata: {e}")
-        return {}
+        return {"success": False, "error": str(e)}
 
 
 def post_json(path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
     try:
         r = requests.post(f"{BASE_URL}{path}", json=payload, timeout=TIMEOUT)
         r.raise_for_status()
-        return r.json()
+        try:
+            return r.json()
+        except Exception:
+            return {
+                "success": False,
+                "status": r.status_code,
+                "content_type": r.headers.get("content-type"),
+                "raw": (r.text or "")[:1000],
+            }
     except Exception as e:
         st.error(f"POST {path} hata: {e}")
         return {"success": False, "error": str(e)}
