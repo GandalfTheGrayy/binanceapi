@@ -14,12 +14,14 @@ class BinanceFuturesClient:
 		self._client = httpx.Client(base_url=self.base_url, timeout=20.0)
 		self._last_request_debug = None
 		self._last_status_code: Optional[int] = None
+		self._time_offset_ms: int = 0
+		self._time_synced: bool = False
 
 	def _headers(self) -> Dict[str, str]:
 		return {"X-MBX-APIKEY": self.api_key}
 
 	def _timestamp(self) -> int:
-		return int(time.time() * 1000)
+		return int(time.time() * 1000) + self._time_offset_ms
 
 	def _sign(self, params: Dict[str, Any]) -> str:
 		query = urlencode(params, doseq=True)
@@ -27,8 +29,9 @@ class BinanceFuturesClient:
 
 	def _signed_get(self, path: str, params: Optional[Dict[str, Any]] = None) -> httpx.Response:
 		params = params.copy() if params else {}
+		self._ensure_time_sync()
 		params.setdefault("timestamp", self._timestamp())
-		params.setdefault("recvWindow", 5000)
+		params.setdefault("recvWindow", 10000)
 		sig = self._sign(params)
 		params["signature"] = sig
 		
@@ -51,8 +54,9 @@ class BinanceFuturesClient:
 
 	def _signed_post(self, path: str, params: Optional[Dict[str, Any]] = None) -> httpx.Response:
 		params = params.copy() if params else {}
+		self._ensure_time_sync()
 		params.setdefault("timestamp", self._timestamp())
-		params.setdefault("recvWindow", 5000)
+		params.setdefault("recvWindow", 10000)
 		sig = self._sign(params)
 		params["signature"] = sig
 		
@@ -79,6 +83,28 @@ class BinanceFuturesClient:
 		resp.raise_for_status()
 		return resp.json() if resp.text else {}
 
+	def server_time(self) -> int:
+		"""Return server time in milliseconds."""
+		resp = self._client.get("/fapi/v1/time")
+		self._last_status_code = resp.status_code
+		resp.raise_for_status()
+		data = resp.json()
+		return int(data.get("serverTime", 0))
+
+	def _ensure_time_sync(self) -> None:
+		"""Sync local offset to Binance server time once to avoid timestamp 400s."""
+		if self._time_synced:
+			return
+		try:
+			server_ts = self.server_time()
+			local_ts = int(time.time() * 1000)
+			self._time_offset_ms = server_ts - local_ts
+			self._time_synced = True
+		except Exception:
+			# If server time fetch fails, continue without sync
+			self._time_offset_ms = 0
+			self._time_synced = True
+
 	def exchange_info(self) -> Dict[str, Any]:
 		resp = self._client.get("/fapi/v1/exchangeInfo")
 		self._last_status_code = resp.status_code
@@ -87,17 +113,37 @@ class BinanceFuturesClient:
 
 	def account_usdt_balances(self) -> Dict[str, float]:
 		"""Return wallet and available USDT balances for USDT-M futures."""
-		resp = self._signed_get("/fapi/v2/balance")
-		resp.raise_for_status()
-		assets = resp.json()
-		for a in assets:
-			if a.get("asset") == "USDT":
-				# walletBalance: total wallet; availableBalance: free balance
-				return {
-					"wallet": float(a.get("balance", a.get("walletBalance", 0.0))),
-					"available": float(a.get("availableBalance", 0.0)),
-				}
-		return {"wallet": 0.0, "available": 0.0}
+		try:
+			resp = self._signed_get("/fapi/v2/balance")
+			self._last_status_code = resp.status_code
+			resp.raise_for_status()
+			assets = resp.json()
+			for a in assets:
+				if a.get("asset") == "USDT":
+					# walletBalance: total wallet; availableBalance: free balance
+					return {
+						"wallet": float(a.get("balance", a.get("walletBalance", 0.0))),
+						"available": float(a.get("availableBalance", 0.0)),
+					}
+			return {"wallet": 0.0, "available": 0.0}
+		except httpx.HTTPStatusError:
+			# Some Testnet environments return 400 for v2; fallback to v3
+			resp2 = self._signed_get("/fapi/v3/account")
+			self._last_status_code = resp2.status_code
+			resp2.raise_for_status()
+			data = resp2.json()
+			assets = data.get("assets") or []
+			for a in assets:
+				if a.get("asset") == "USDT":
+					return {
+						"wallet": float(a.get("walletBalance", 0.0)),
+						"available": float(a.get("availableBalance", 0.0)),
+					}
+			# Fallback to top-level totals if assets list missing
+			return {
+				"wallet": float(data.get("totalWalletBalance", 0.0)),
+				"available": float(data.get("availableBalance", 0.0)),
+			}
 
 	def set_leverage(self, symbol: str, leverage: int) -> Dict[str, Any]:
 		resp = self._signed_post("/fapi/v1/leverage", {"symbol": symbol, "leverage": leverage})

@@ -322,12 +322,15 @@ async def proxy_streamlit_ws(websocket: WebSocket):
             upstream_url,
             extra_headers=extra_headers,
             subprotocols=subprotocols if subprotocols else None,
+            ping_interval=20,
+            ping_timeout=20,
         ) as upstream:
             async def client_to_upstream():
                 try:
                     while True:
                         msg = await websocket.receive()
-                        if msg.get("type") == "websocket.close":
+                        typ = msg.get("type")
+                        if typ == "websocket.disconnect":
                             try:
                                 await upstream.close()
                             except Exception:
@@ -357,7 +360,12 @@ async def proxy_streamlit_ws(websocket: WebSocket):
 
             t1 = asyncio.create_task(client_to_upstream())
             t2 = asyncio.create_task(upstream_to_client())
-            await asyncio.wait({t1, t2}, return_when=asyncio.FIRST_COMPLETED)
+            done, pending = await asyncio.wait({t1, t2}, return_when=asyncio.FIRST_COMPLETED)
+            for p in pending:
+                try:
+                    p.cancel()
+                except Exception:
+                    pass
     except Exception:
         # Upstream bağlantı kurulamadı ise 403 ile kapat
         try:
@@ -543,6 +551,11 @@ async def get_binance_price(symbol: str):
         return {"success": True, "symbol": symbol.upper(), "price": price}
     except Exception as e:
         return {"success": False, "error": str(e)}
+
+# Alias: support query-style access as used by some frontends
+@app.get("/api/binance/price")
+async def get_binance_price_query(symbol: str):
+    return await get_binance_price(symbol)
 
 
 @app.get("/api/orders")
