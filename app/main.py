@@ -223,6 +223,9 @@ async def _proxy_streamlit(path: str, request: Request) -> Response:
     # Hop-by-hop header'ları çıkar
     excluded = {"transfer-encoding", "content-encoding", "connection"}
     headers = {k: v for k, v in resp.headers.items() if k.lower() not in excluded}
+    # Tarayıcı cache'ini agresif şekilde kapat — UI yüklenmesini engelleyebilecek 304/etag davranışını azaltır
+    headers["Cache-Control"] = "no-store"
+    headers["Pragma"] = "no-cache"
     # Content-Type'ı koru
     media_type = resp.headers.get("content-type")
     return Response(content=resp.content, status_code=resp.status_code, headers=headers, media_type=media_type)

@@ -335,7 +335,7 @@ async def handle_tradingview(
 			msg_lines.append(force_msg)
 		if bracket_warn:
 			msg_lines.append(f"warning: {bracket_warn}")
-		notifier.send("\n".join(msg_lines))
+		notifier.send_message("\n".join(msg_lines))
 	except Exception:
 		pass
 

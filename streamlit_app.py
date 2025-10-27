@@ -59,7 +59,12 @@ handle_webhook()
 DEFAULT_BASE = os.getenv("DEFAULT_BASE", "http://127.0.0.1:8000")
 BACKEND_URL = os.getenv("BACKEND_URL", "").strip()
 FRONTEND_BACKEND_URL = os.getenv("FRONTEND_BACKEND_URL", "").strip()
-BASE_URL = (BACKEND_URL or FRONTEND_BACKEND_URL or DEFAULT_BASE).rstrip("/")
+PORT = os.getenv("PORT", "8000").strip()
+# BACKEND_URL boşsa ya da $PORT placeholder içeriyorsa, container içi 127.0.0.1:<PORT> kullan
+if (not BACKEND_URL) or ("$PORT" in BACKEND_URL) or ("localhost:$PORT" in BACKEND_URL):
+    BASE_URL = f"http://127.0.0.1:{PORT}"
+else:
+    BASE_URL = (BACKEND_URL or FRONTEND_BACKEND_URL or DEFAULT_BASE).rstrip("/")
 
 # HTTP timeout to avoid UI freeze on unreachable backend
 TIMEOUT = float(os.getenv("FRONTEND_HTTP_TIMEOUT", "5"))

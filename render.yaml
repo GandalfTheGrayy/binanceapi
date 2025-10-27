@@ -31,8 +31,7 @@ services:
         sync: false
       - key: ENV
         value: "production"
-      - key: BACKEND_URL
-        value: "http://localhost:$PORT"  # Streamlit'in backend çağrıları için public FastAPI
+
 
 databases:
   # SQLite database will be handled as a file in the service
