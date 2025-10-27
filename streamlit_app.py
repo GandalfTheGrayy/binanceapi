@@ -251,22 +251,22 @@ with sec_dashboard:
         col1, col2, col3 = st.columns(3)
         with col1:
             snaps = get_json("/api/snapshots") or []
-            if snaps:
+            if snaps and isinstance(snaps, list) and len(snaps) > 0:
                 last = snaps[-1]
-                st.metric("Wallet (USDT)", f"{last.get('wallet', 0):.2f}")
-                st.metric("Available (USDT)", f"{last.get('available', 0):.2f}")
-                st.metric("Used (USDT)", f"{last.get('used', 0):.2f}")
+                st.metric("Wallet (USDT)", f"{last.get('total_wallet_balance', 0):.2f}")
+                st.metric("Available (USDT)", f"{last.get('available_balance', 0):.2f}")
+                st.metric("Used (USDT)", f"{last.get('used_allocation_usd', 0):.2f}")
                 # Mini grafik: wallet/available/used zaman serisi
                 try:
                     df = pd.DataFrame(snaps)
-                    if "ts" in df.columns:
-                        df["ts"] = pd.to_datetime(df["ts"])  # zaman ekseni
-                        df = df.set_index("ts")
-                    st.line_chart(df[["wallet", "available", "used"]])
+                    if "created_at" in df.columns:
+                        df["created_at"] = pd.to_datetime(df["created_at"])  # zaman ekseni
+                        df = df.set_index("created_at")
+                        st.line_chart(df[["total_wallet_balance", "available_balance", "used_allocation_usd"]])
                 except Exception:
                     pass
             else:
-                st.info("Henüz snapshot yok.")
+                st.info("Henüz bakiye verisi yok")
         with col2:
             logs = get_json("/api/logs?limit=25") or []
             st.write("Son Binance API çağrıları")
