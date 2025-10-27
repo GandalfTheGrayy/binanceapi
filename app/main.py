@@ -295,25 +295,28 @@ def _ws_internal_url(path: str, query: str = "") -> str:
 
 @app.websocket("/_stcore/stream")
 async def proxy_streamlit_ws(websocket: WebSocket):
-    # İstemci bağlantısını kabul et
-    await websocket.accept()
+    # Subprotocol (ör. 'streamlit') müzakeresini koru
+    proto_header = websocket.headers.get("sec-websocket-protocol")
+    subprotocols = [p.strip() for p in (proto_header or "").split(",") if p.strip()]
+    if subprotocols:
+        await websocket.accept(subprotocol=subprotocols[0])
+    else:
+        await websocket.accept()
+
     upstream_url = _ws_internal_url("/_stcore/stream", query=str(websocket.url.query or ""))
 
-    # İstemciden gelen Cookie ve Origin bilgilerini upstream'e ilet
+    # İstemciden gelen Cookie bilgisini upstream'e ilet
     cookie = websocket.headers.get("cookie")
-    origin = None
-    host = websocket.headers.get("host")
-    # Origin'i public host üzerinden ayarla (Streamlit genelde Origin kontrolü yapmıyor ama güvenli)
-    if host:
-        # Not: Render tarafında https olabilir; origin zorunlu değil, bu yüzden None bırakmak daha güvenli olabilir
-        origin = None
-
     extra_headers = []
     if cookie:
         extra_headers.append(("Cookie", cookie))
 
     try:
-        async with websockets.connect(upstream_url, extra_headers=extra_headers, origin=origin) as upstream:
+        async with websockets.connect(
+            upstream_url,
+            extra_headers=extra_headers,
+            subprotocols=subprotocols if subprotocols else None,
+        ) as upstream:
             async def client_to_upstream():
                 try:
                     while True:
