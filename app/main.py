@@ -41,6 +41,16 @@ templates = Jinja2Templates(directory="templates")
 # Routers
 app.include_router(webhook.router)
 
+# Adapter: TradingView POST'ları root ("/") adresine gönderenler için
+# Aynı webhook işlevini doğrudan kökte de kabul ediyoruz
+@app.post("/", response_model=schemas.OrderResult)
+async def root_webhook_adapter(payload: schemas.TradingViewWebhook):
+\tdb = SessionLocal()
+\ttry:
+\t\treturn await webhook.handle_tradingview(payload, db)
+\tfinally:
+\t\tdb.close()
+
 # Quick debug endpoints close to the top to verify live routes
 @app.get("/api/ping2")
 async def ping2():
