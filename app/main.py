@@ -44,12 +44,12 @@ app.include_router(webhook.router)
 # Adapter: TradingView POST'ları root ("/") adresine gönderenler için
 # Aynı webhook işlevini doğrudan kökte de kabul ediyoruz
 @app.post("/", response_model=schemas.OrderResult)
-async def root_webhook_adapter(payload: schemas.TradingViewWebhook):
-    db = SessionLocal()
-    try:
-        return await webhook.handle_tradingview(payload, db)
-    finally:
-        db.close()
+async def root_webhook_adapter(payload: schemas.TradingViewWebhook, request: Request):
+	db = SessionLocal()
+	try:
+		return await webhook.handle_tradingview(payload, request, db)
+	finally:
+		db.close()
 
 # Quick debug endpoints close to the top to verify live routes
 @app.get("/api/ping2")

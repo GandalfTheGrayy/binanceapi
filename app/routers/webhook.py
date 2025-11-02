@@ -24,6 +24,22 @@ def get_db():
 		db.close()
 
 
+def get_client_ip(request: Request) -> str:
+	"""Extract client IP address from request, handling proxies."""
+	# Proxy arkasındaysa (X-Forwarded-For)
+	forwarded = request.headers.get("X-Forwarded-For")
+	if forwarded:
+		return forwarded.split(",")[0].strip()
+	
+	# X-Real-IP header'ı
+	real_ip = request.headers.get("X-Real-IP")
+	if real_ip:
+		return real_ip
+	
+	# Direkt bağlantı
+	return request.client.host if request.client else "unknown"
+
+
 def _log_binance_call(db: Session, method: str, path: str, client: BinanceFuturesClient, response_data: Any | None = None, error: str | None = None):
 	debug = client.get_last_request_debug() if hasattr(client, 'get_last_request_debug') else None
 	status = client.get_last_status_code() if hasattr(client, 'get_last_status_code') else None
@@ -43,6 +59,7 @@ def _log_binance_call(db: Session, method: str, path: str, client: BinanceFuture
 @router.post("/tradingview", response_model=schemas.OrderResult)
 async def handle_tradingview(
 	payload: schemas.TradingViewWebhook,
+	request: Request,
 	db: Session = Depends(get_db)
 ):
 	settings = get_settings()
@@ -59,11 +76,28 @@ async def handle_tradingview(
 		raise HTTPException(status_code=400, detail="Symbol or ticker required")
 	symbol = normalize_tv_symbol(symbol)
 
+	# Get client IP
+	client_ip = get_client_ip(request)
+
 	# Record webhook
 	evt = models.WebhookEvent(symbol=symbol, signal=payload.signal, price=payload.price, payload=payload.dict())
 	db.add(evt)
 	db.commit()
 	db.refresh(evt)
+
+	# İlk bildirim: Webhook geldi
+	try:
+		initial_msg = [
+			"🔔 Yeni Webhook İsteği",
+			f"IP: {client_ip}",
+			f"Symbol: {symbol}",
+			f"Signal: {payload.signal.upper()}",
+		]
+		if payload.leverage:
+			initial_msg.append(f"Leverage: {payload.leverage}x")
+		notifier.send_message("\n".join(initial_msg))
+	except Exception:
+		pass
 
 	# Broadcast to WS
 	await ws_manager.broadcast_json({
@@ -115,13 +149,15 @@ async def handle_tradingview(
 			_log_binance_call(db, "POST", "/fapi/v1/positionSide/dual", client, error=str(e))
 			raise HTTPException(status_code=400, detail=f"Pozisyon modu One-way'a çekilemedi: {e}")
 
-	# Get current available balance from Binance
+	# Get current available balance from Binance (işlem öncesi)
 	available_balance = 100000.0  # Default for dry_run
+	balance_before = 100000.0
 	if settings.binance_api_key and settings.binance_api_secret and not settings.dry_run:
 		try:
 			acct = client.account_usdt_balances()
 			_log_binance_call(db, "GET", "/fapi/v2/balance", client, response_data=acct)
 			available_balance = acct.get("available", 100000.0)
+			balance_before = available_balance  # İşlem öncesi bakiye
 		except Exception as e:
 			_log_binance_call(db, "GET", "/fapi/v2/balance", client, error=str(e))
 			raise HTTPException(status_code=400, detail=f"Balance alınamadı: {e}")
@@ -307,33 +343,68 @@ async def handle_tradingview(
 	)
 	db.add(order)
 
+	# İşlem sonrası bakiyeyi çek
+	balance_after = balance_before  # Default
+	if settings.binance_api_key and settings.binance_api_secret and not settings.dry_run:
+		try:
+			acct_after = client.account_usdt_balances()
+			_log_binance_call(db, "GET", "/fapi/v2/balance (after)", client, response_data=acct_after)
+			balance_after = acct_after.get("available", balance_before)
+		except Exception as e:
+			_log_binance_call(db, "GET", "/fapi/v2/balance (after)", client, error=str(e))
+			# Hata durumunda balance_before'u kullan
+			pass
+
 	# Balance snapshot (yeni mantıkla)
 	margin_used = trade_amount_usdt
 	snap = models.BalanceSnapshot(
-		total_wallet_balance=available_balance + margin_used,  # Yaklaşık toplam
-		available_balance=available_balance,
+		total_wallet_balance=balance_after + margin_used,  # Yaklaşık toplam
+		available_balance=balance_after,
 		used_allocation_usd=margin_used,
 		note=f"Trade: {symbol} {side} qty={order_qty} margin={margin_used:.2f} USDT (available balance %10)",
 	)
 	db.add(snap)
 	db.commit()
 
-	# Bildirim
+	# Detaylı bildirim: İşlem tamamlandı
 	try:
 		msg_lines = [
-			f"{symbol} {side} qty={order_qty} lev={leverage}",
-			f"price={price} margin={trade_amount_usdt:.2f} USDT notional={notional:.2f} USDT",
-			f"available_balance={available_balance:.2f} (used %10)",
+			"✅ İşlem Tamamlandı",
+			"",
+			"📊 İşlem Detayları:",
+			f"Symbol: {symbol}",
+			f"Side: {side}",
+			f"Quantity: {order_qty}",
+			f"Price: {price:.2f} USDT",
+			f"Leverage: {leverage}x",
+			f"Margin: {trade_amount_usdt:.2f} USDT",
+			f"Notional: {notional:.2f} USDT",
+			"",
+			"💰 Bakiye Değişimi:",
+			f"Önceki: {balance_before:.2f} USDT (available)",
+			f"Sonraki: {balance_after:.2f} USDT (available)",
+			f"Kullanılan: {margin_used:.2f} USDT",
 		]
+		
 		if has_opposite_position:
+			msg_lines.append("")
 			msg_lines.append("⚠️ Ters pozisyon var - 2x quantity kullanıldı")
-		if position_side:
-			msg_lines.append(f"positionSide={position_side}")
-		if force_msg:
-			msg_lines.append(force_msg)
-		if bracket_warn:
-			msg_lines.append(f"warning: {bracket_warn}")
+		
+		msg_lines.append("")
 		msg_lines.append("📊 Margin Type: ISOLATED")
+		
+		if order.binance_order_id:
+			msg_lines.append(f"Order ID: {order.binance_order_id}")
+		
+		if position_side:
+			msg_lines.append(f"Position Side: {position_side}")
+		
+		if force_msg:
+			msg_lines.append(f"ℹ️ {force_msg}")
+		
+		if bracket_warn:
+			msg_lines.append(f"⚠️ {bracket_warn}")
+		
 		notifier.send_message("\n".join(msg_lines))
 	except Exception:
 		pass
