@@ -150,6 +150,12 @@ class BinanceFuturesClient:
 		resp.raise_for_status()
 		return resp.json()
 
+	def set_margin_type(self, symbol: str, margin_type: str) -> Dict[str, Any]:
+		"""Set margin type for a symbol. margin_type: 'ISOLATED' or 'CROSSED'"""
+		resp = self._signed_post("/fapi/v1/marginType", {"symbol": symbol, "marginType": margin_type})
+		resp.raise_for_status()
+		return resp.json()
+
 	def place_market_order(self, symbol: str, side: str, quantity: float, position_side: Optional[str] = None) -> Dict[str, Any]:
 		params: Dict[str, Any] = {
 			"symbol": symbol,

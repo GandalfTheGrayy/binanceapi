@@ -86,10 +86,6 @@ async def handle_tradingview(
 	else:
 		raise HTTPException(status_code=400, detail="Unsupported signal")
 
-	whitelist = settings.get_symbols_whitelist()
-	if symbol.upper() not in whitelist:
-		raise HTTPException(status_code=400, detail="Symbol not allowed")
-
 	# Exchange info (logla)
 	try:
 		ex_info = client.exchange_info()
@@ -119,93 +115,77 @@ async def handle_tradingview(
 			_log_binance_call(db, "POST", "/fapi/v1/positionSide/dual", client, error=str(e))
 			raise HTTPException(status_code=400, detail=f"Pozisyon modu One-way'a çekilemedi: {e}")
 
-	# Allocation tracking
-	first_snap = db.query(models.BalanceSnapshot).order_by(models.BalanceSnapshot.id.asc()).first()
-	last_snapshot = db.query(models.BalanceSnapshot).order_by(models.BalanceSnapshot.id.desc()).first()
-	used_alloc = last_snapshot.used_allocation_usd if last_snapshot else 0.0
+	# Get current available balance from Binance
+	available_balance = 100000.0  # Default for dry_run
+	if settings.binance_api_key and settings.binance_api_secret and not settings.dry_run:
+		try:
+			acct = client.account_usdt_balances()
+			_log_binance_call(db, "GET", "/fapi/v2/balance", client, response_data=acct)
+			available_balance = acct.get("available", 100000.0)
+		except Exception as e:
+			_log_binance_call(db, "GET", "/fapi/v2/balance", client, error=str(e))
+			raise HTTPException(status_code=400, detail=f"Balance alınamadı: {e}")
 
-	# Determine initial wallet
-	if not first_snap:
-		initial_wallet = 100000.0
-		if settings.binance_api_key and settings.binance_api_secret and not settings.dry_run:
-			try:
-				acct = client.account_usdt_balances()
-				_log_binance_call(db, "GET", "/fapi/v2/balance", client, response_data=acct)
-				initial_wallet = acct.get("wallet", initial_wallet)
-			except Exception as e:
-				_log_binance_call(db, "GET", "/fapi/v2/balance", client, error=str(e))
-				pass
-		# create first snapshot
-		snap0 = models.BalanceSnapshot(
-			total_wallet_balance=initial_wallet,
-			available_balance=initial_wallet,
-			used_allocation_usd=0.0,
-			note="Initial snapshot",
-		)
-		db.add(snap0)
-		db.commit()
-		first_snap = snap0
-
-	initial_wallet = first_snap.total_wallet_balance
-
-	# Kullanıcı tanımlı limit (runtime) öncelikli
-	allocation_cap = runtime.allocation_cap_usd if getattr(runtime, 'allocation_cap_usd', 0) else None
-	if not allocation_cap:
-		allocation_cap = initial_wallet * (settings.allocation_pct / 100.0)
-
-	# Kaldıraç seçimi ve fiyat
+	# Kaldıraç seçimi ve fiyat (Binance'den güncel fiyat çek)
 	leverage = runtime.select_leverage(settings, symbol, payload.leverage)
-	price = payload.price or 0.0
-	if price <= 0:
-		raise HTTPException(status_code=400, detail="Price is required for sizing in this phase")
+	try:
+		price = client.ticker_price(symbol)
+		_log_binance_call(db, "GET", "/fapi/v1/ticker/price", client, response_data={"symbol": symbol, "price": price})
+		if price <= 0:
+			raise ValueError("Geçersiz fiyat")
+	except Exception as e:
+		_log_binance_call(db, "GET", "/fapi/v1/ticker/price", client, error=str(e))
+		raise HTTPException(status_code=400, detail=f"Fiyat bilgisi alınamadı: {e}")
 
-	per_trade_pct = getattr(runtime, 'per_trade_pct', None) or settings.per_trade_pct or 10.0
-
-	# Qty belirleme: eğer payload.qty verildiyse onu kullan, yoksa mevcut sizing ile hesapla
+	# Quantity hesaplama: Available balance'ın %10'u
 	filters = get_symbol_filters(ex_info, symbol)
 	step = filters["stepSize"] or 0.0001
-	used_direct_qty = False
-	try:
-		if payload.qty and payload.qty > 0:
-			qty = round_step(float(payload.qty), step)
-			notional = price * qty
-			lev = max(1, int(leverage or 1))
-			margin_usd = notional / lev
-			used_direct_qty = True
-		else:
-			qty, margin_usd, notional = compute_quantity(
-				symbol=symbol,
-				price=price,
-				leverage=leverage,
-				allocation_cap_usd=allocation_cap,
-				used_allocation_usd=used_alloc,
-				per_trade_pct=per_trade_pct,
-				exchange_info=ex_info,
-			)
-	except ValueError as e:
-		remaining = max(0.0, allocation_cap - used_alloc)
-		raise HTTPException(status_code=400, detail=f"{str(e)} (cap={allocation_cap}, used={used_alloc}, remaining={remaining})")
+	
+	# Available balance'ın %10'u ile işlem yapacağız
+	trade_amount_usdt = available_balance * 0.10
+	
+	# Kaldıraçla notional hesaplama
+	lev = max(1, int(leverage or 1))
+	notional = trade_amount_usdt * lev
+	
+	# Base quantity hesaplama
+	base_qty = notional / price
+	base_qty = round_step(base_qty, step)
+	
+	if base_qty <= 0 or base_qty < filters["minQty"]:
+		raise HTTPException(status_code=400, detail="Hesaplanan quantity minimum lot size'dan küçük")
 
-	# Flip sonrası toplam emir miktarı
-	order_qty = qty
-	flip_offset = 0.0
+	# Pozisyon kontrolü: Ters yönde pozisyon varsa 2x quantity
+	order_qty = base_qty
+	has_opposite_position = False
+	
 	try:
 		cur_positions = client.positions([symbol])
+		_log_binance_call(db, "GET", "/fapi/v2/positionRisk", client, response_data=cur_positions)
+		
 		for p in cur_positions:
 			if p.get("symbol") == symbol:
 				amt = float(p.get("positionAmt", 0) or 0)
+				# BUY isteği + SHORT pozisyon = 2x
 				if side == "BUY" and amt < 0:
-					order_qty = qty + abs(amt)
-					flip_offset = abs(amt)
+					has_opposite_position = True
+				# SELL isteği + LONG pozisyon = 2x
 				elif side == "SELL" and amt > 0:
-					order_qty = qty + amt
-					flip_offset = amt
+					has_opposite_position = True
 				break
-		# Adım hassasiyetine göre miktarı yuvarla
-		order_qty = round_step(order_qty, step)
-	except Exception:
-		# Pozisyonlar okunamazsa sadece hesaplanan qty ile devam et
+	except Exception as e:
+		_log_binance_call(db, "GET", "/fapi/v2/positionRisk", client, error=str(e))
+		# Pozisyonlar okunamazsa 1x quantity ile devam et
 		pass
+	
+	# Ters pozisyon varsa 2x, yoksa 1x
+	if has_opposite_position:
+		order_qty = base_qty * 2
+	else:
+		order_qty = base_qty
+	
+	# Adım hassasiyetine göre miktarı yuvarla
+	order_qty = round_step(order_qty, step)
 
 	# Kaldıraç braketi (maxNotional) kontrolü: -2027'yi önlemek için miktarı sınırla
 	bracket_warn = None
@@ -226,22 +206,13 @@ async def handle_tradingview(
 					break
 		if entry:
 			max_notional = float(entry.get("maxNotionalValue") or 0.0)
-			existing_amt = float(entry.get("positionAmt") or 0.0)
-			existing_notional_abs = abs(float(entry.get("notional") or 0.0))
-			# Kapanış için gereken ofset (flip senaryosu)
-			offset_to_close = 0.0
-			if side == "BUY" and existing_amt < 0:
-				offset_to_close = abs(existing_amt)
-			elif side == "SELL" and existing_amt > 0:
-				offset_to_close = existing_amt
-			base_qty = max(0.0, order_qty - offset_to_close)
-			baseline_notional = 0.0 if offset_to_close > 0 else existing_notional_abs
-			allowed_new_notional = max(0.0, (max_notional - baseline_notional))
-			allowed_base_qty = (allowed_new_notional / price) if price > 0 else 0.0
-			capped_base_qty = round_step(min(base_qty, allowed_base_qty), step)
-			if capped_base_qty < base_qty:
-				order_qty = round_step(capped_base_qty + offset_to_close, step)
-				bracket_warn = f"Qty braket ile sınırlandı: maxNotional={max_notional}, mevcut={baseline_notional}, price={price}"
+			new_notional = order_qty * price
+			
+			# Yeni notional değeri max'ı aşıyorsa sınırla
+			if new_notional > max_notional and max_notional > 0:
+				allowed_qty = (max_notional / price) if price > 0 else 0.0
+				order_qty = round_step(allowed_qty, step)
+				bracket_warn = f"Qty braket ile sınırlandı: maxNotional={max_notional}, price={price}, allowed_qty={order_qty}"
 	except Exception as e:
 		_log_binance_call(db, "GET", "/fapi/v2/positionRisk", client, error=str(e))
 		pass
@@ -266,7 +237,9 @@ async def handle_tradingview(
 			"price": price,
 			"position_side": position_side,
 			"note": force_msg,
-			"sizing": ("direct_qty" if used_direct_qty else "auto"),
+			"available_balance": available_balance,
+			"trade_amount_usdt": trade_amount_usdt,
+			"has_opposite_position": has_opposite_position,
 		}
 	else:
 		try:
@@ -283,6 +256,28 @@ async def handle_tradingview(
 			err_msg = f"Leverage ayarlanamadı: {e}" + (f" | Binance: {extra}" if extra else "")
 			_log_binance_call(db, "POST", "/fapi/v1/leverage", client, error=err_msg)
 			raise HTTPException(status_code=400, detail=err_msg)
+		
+		# Isolated margin ayarla
+		try:
+			resp_margin = client.set_margin_type(symbol, "ISOLATED")
+			_log_binance_call(db, "POST", "/fapi/v1/marginType", client, response_data=resp_margin)
+		except Exception as e:
+			# Margin type zaten ayarlanmışsa hata verebilir, devam et
+			extra = None
+			if isinstance(e, httpx.HTTPStatusError):
+				try:
+					extra = e.response.json()
+					# -4046 kodu: No need to change margin type (zaten ISOLATED)
+					if extra.get("code") == -4046:
+						pass  # Bu normal, devam et
+					else:
+						raise
+				except Exception:
+					extra = e.response.text
+					raise
+			else:
+				_log_binance_call(db, "POST", "/fapi/v1/marginType", client, error=str(e))
+		
 		try:
 			order_response = client.place_market_order(symbol, side, order_qty, position_side=position_side)
 			_log_binance_call(db, "POST", "/fapi/v1/order", client, response_data=order_response)
@@ -312,13 +307,13 @@ async def handle_tradingview(
 	)
 	db.add(order)
 
-	# Update allocation usage snapshot
-	new_used = used_alloc + (notional / max(1, int(leverage or 1)))
+	# Balance snapshot (yeni mantıkla)
+	margin_used = trade_amount_usdt
 	snap = models.BalanceSnapshot(
-		total_wallet_balance=first_snap.total_wallet_balance,
-		available_balance=first_snap.total_wallet_balance - new_used,
-		used_allocation_usd=new_used,
-		note=f"Applied margin {notional / max(1, int(leverage or 1))} USDT for {symbol}",
+		total_wallet_balance=available_balance + margin_used,  # Yaklaşık toplam
+		available_balance=available_balance,
+		used_allocation_usd=margin_used,
+		note=f"Trade: {symbol} {side} qty={order_qty} margin={margin_used:.2f} USDT (available balance %10)",
 	)
 	db.add(snap)
 	db.commit()
@@ -327,14 +322,18 @@ async def handle_tradingview(
 	try:
 		msg_lines = [
 			f"{symbol} {side} qty={order_qty} lev={leverage}",
-			f"price={price} margin={(notional / max(1, int(leverage or 1)))} notional={notional}",
+			f"price={price} margin={trade_amount_usdt:.2f} USDT notional={notional:.2f} USDT",
+			f"available_balance={available_balance:.2f} (used %10)",
 		]
+		if has_opposite_position:
+			msg_lines.append("⚠️ Ters pozisyon var - 2x quantity kullanıldı")
 		if position_side:
 			msg_lines.append(f"positionSide={position_side}")
 		if force_msg:
 			msg_lines.append(force_msg)
 		if bracket_warn:
 			msg_lines.append(f"warning: {bracket_warn}")
+		msg_lines.append("📊 Margin Type: ISOLATED")
 		notifier.send_message("\n".join(msg_lines))
 	except Exception:
 		pass
