@@ -119,7 +119,7 @@ async def ws_endpoint(ws: WebSocket):
 
 
 def heartbeat_job():
-    """Her dakika çalışan bot durumu mesajı"""
+    """Her saat çalışan bot durumu mesajı"""
     try:
         settings = get_settings()
         notifier = TelegramNotifier(settings.telegram_bot_token, settings.telegram_chat_id)
@@ -209,11 +209,18 @@ def on_startup():
                 db.close()
     global scheduler
     scheduler = BackgroundScheduler()
-    # Her dakika bot durumu mesajı
-    scheduler.add_job(heartbeat_job, "interval", minutes=1, id="heartbeat_job", replace_existing=True)
+    # Her saat bot durumu mesajı
+    scheduler.add_job(heartbeat_job, "interval", hours=1, id="heartbeat_job", replace_existing=True)
     # Saatlik PnL raporu
     scheduler.add_job(hourly_pnl_job, "interval", hours=1, id="hourly_pnl_job", replace_existing=True)
     scheduler.start()
+    
+    # Bot başlatıldığında hemen test mesajı gönder
+    try:
+        notifier = TelegramNotifier(settings.telegram_bot_token, settings.telegram_chat_id)
+        notifier.send_message("🚀 Bot başlatıldı ve çalışıyor!")
+    except Exception as e:
+        print(f"[Startup] Telegram test mesajı gönderilemedi: {e}")
 
     # Debug: print registered routes and openapi paths on startup
     try:
@@ -723,6 +730,59 @@ async def create_binance_order(payload: schemas.TradingViewWebhook):
 @app.get("/api/debug/routes")
 async def debug_routes():
     return [getattr(r, "path", None) for r in app.routes]
+
+
+@app.post("/api/telegram/test")
+async def test_telegram():
+    """Telegram bağlantısını test et"""
+    settings = get_settings()
+    
+    print(f"[DEBUG] Bot Token: {settings.telegram_bot_token[:20] if settings.telegram_bot_token else 'BOŞ'}...")
+    print(f"[DEBUG] Chat ID: {settings.telegram_chat_id}")
+    
+    if not settings.telegram_bot_token or not settings.telegram_chat_id:
+        return {
+            "success": False, 
+            "error": "TELEGRAM_BOT_TOKEN veya TELEGRAM_CHAT_ID .env dosyasında tanımlanmamış",
+            "bot_token_exists": bool(settings.telegram_bot_token),
+            "chat_id_exists": bool(settings.telegram_chat_id),
+            "bot_token_length": len(settings.telegram_bot_token) if settings.telegram_bot_token else 0,
+            "chat_id_value": settings.telegram_chat_id
+        }
+    
+    try:
+        notifier = TelegramNotifier(settings.telegram_bot_token, settings.telegram_chat_id)
+        timestamp = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+        result = notifier.send_message(f"🧪 Test Mesajı - {timestamp}")
+        
+        if result:
+            return {
+                "success": True, 
+                "message": "Telegram mesajı başarıyla gönderildi! Telegram uygulamanızı kontrol edin.",
+                "response": result
+            }
+        else:
+            return {
+                "success": False,
+                "error": notifier.last_error or "Telegram API yanıt vermedi",
+                "last_error": notifier.last_error,
+                "bot_token_preview": settings.telegram_bot_token[:20] + "..." if len(settings.telegram_bot_token) > 20 else settings.telegram_bot_token,
+                "chat_id": settings.telegram_chat_id
+            }
+    except Exception as e:
+        return {
+            "success": False, 
+            "error": str(e),
+            "exception_type": type(e).__name__,
+            "bot_token_preview": settings.telegram_bot_token[:20] + "..." if len(settings.telegram_bot_token) > 20 else settings.telegram_bot_token,
+            "chat_id": settings.telegram_chat_id
+        }
+
+
+@app.get("/api/telegram/test")
+async def test_telegram_get():
+    """GET ile de test edilebilmesi için"""
+    return await test_telegram()
 
 # Catch-all proxy: bilinmeyen yolları Streamlit'e yönlendir (dosyanın sonunda tanımlı)
 @app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"])
