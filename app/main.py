@@ -118,6 +118,17 @@ async def ws_endpoint(ws: WebSocket):
         ws_manager.disconnect(ws)
 
 
+def heartbeat_job():
+    """Her dakika çalışan bot durumu mesajı"""
+    try:
+        settings = get_settings()
+        notifier = TelegramNotifier(settings.telegram_bot_token, settings.telegram_chat_id)
+        timestamp = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+        notifier.send_message(f"✅ Bot çalışıyor - {timestamp}")
+    except Exception:
+        pass
+
+
 def hourly_pnl_job():
     db = SessionLocal()
     try:
@@ -198,6 +209,9 @@ def on_startup():
                 db.close()
     global scheduler
     scheduler = BackgroundScheduler()
+    # Her dakika bot durumu mesajı
+    scheduler.add_job(heartbeat_job, "interval", minutes=1, id="heartbeat_job", replace_existing=True)
+    # Saatlik PnL raporu
     scheduler.add_job(hourly_pnl_job, "interval", hours=1, id="hourly_pnl_job", replace_existing=True)
     scheduler.start()
 
