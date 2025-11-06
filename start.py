@@ -21,7 +21,7 @@ def start_streamlit_bg():
         "run",
         "streamlit_app.py",
         "--server.port", s_port,
-        "--server.address", "127.0.0.1",
+        "--server.address", "0.0.0.0",
         "--server.headless", "true",
     ])
 
