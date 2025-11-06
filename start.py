@@ -42,7 +42,7 @@ if __name__ == "__main__":
     print("🚀 Binance Futures Bot başlatılıyor (FastAPI public + Streamlit internal)...")
     # Streamlit'in backend'i doğru bulabilmesi için, PORT değerinden BACKEND_URL'i üret
     try:
-        _port = os.getenv("PORT", "80")
+        _port = os.getenv("PORT", "8000")
         os.environ.setdefault("BACKEND_URL", f"http://127.0.0.1:{_port}")
     except Exception:
         pass
