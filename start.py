@@ -27,7 +27,7 @@ def start_streamlit_bg():
 
 def start_backend_foreground():
     """FastAPI backend'i public PORT üzerinde başlat (uvicorn)"""
-    port = os.getenv("PORT", "80")
+    port = os.getenv("PORT", "8000")
     print(f"🧠 FastAPI backend (public) başlatılıyor - Port: {port}")
     subprocess.run([
         sys.executable,
