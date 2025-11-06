@@ -27,7 +27,7 @@ def start_streamlit_bg():
 
 def start_backend_foreground():
     """FastAPI backend'i public PORT üzerinde başlat (uvicorn)"""
-    port = os.getenv("PORT", "8000")
+    port = os.getenv("PORT", "80")
     print(f"🧠 FastAPI backend (public) başlatılıyor - Port: {port}")
     subprocess.run([
         sys.executable,
@@ -42,7 +42,7 @@ if __name__ == "__main__":
     print("🚀 Binance Futures Bot başlatılıyor (FastAPI public + Streamlit internal)...")
     # Streamlit'in backend'i doğru bulabilmesi için, PORT değerinden BACKEND_URL'i üret
     try:
-        _port = os.getenv("PORT", "8000")
+        _port = os.getenv("PORT", "80")
         os.environ.setdefault("BACKEND_URL", f"http://127.0.0.1:{_port}")
     except Exception:
         pass
