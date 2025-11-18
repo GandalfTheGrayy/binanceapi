@@ -121,6 +121,51 @@ async def handle_tradingview(
 	else:
 		raise HTTPException(status_code=400, detail="Unsupported signal")
 
+	# Check for existing position in the same direction
+	try:
+		# Sadece kontrol amaçlı pozisyon sorgula
+		positions_check = client.positions(symbols=[symbol])
+		_log_binance_call(db, "GET", "/fapi/v2/positionRisk", client, response_data=positions_check)
+		
+		for pos in positions_check:
+			if pos.get("symbol") == symbol:
+				amt = float(pos.get("positionAmt", 0) or 0)
+				should_skip = False
+				
+				# BUY isteği + LONG pozisyon (amt > 0)
+				if side == "BUY" and amt > 0:
+					should_skip = True
+				# SELL isteği + SHORT pozisyon (amt < 0)
+				elif side == "SELL" and amt < 0:
+					should_skip = True
+				
+				if should_skip:
+					# Telegram mesajı
+					try:
+						skip_msg = [
+							"⛔ İşlem Yapılmadı: Aynı Yönde Pozisyon İsteği",
+							"",
+							f"Symbol: {symbol}",
+							f"İstek: {side}",
+							f"Mevcut Pozisyon: {amt}",
+							"",
+							"Aynı yönde açık pozisyon olduğu için yeni işlem açılmadı."
+						]
+						notifier.send_message("\n".join(skip_msg))
+					except Exception:
+						pass
+					
+					return {
+						"success": True,
+						"message": f"İşlem yapılmadı: {symbol} üzerinde zaten aynı yönde ({'LONG' if amt > 0 else 'SHORT'}) pozisyon var.",
+						"order_id": None,
+						"response": {"positionAmt": amt}
+					}
+				break 
+	except Exception as e:
+		# Hata olursa logla ama akışı bozma, devam et
+		_log_binance_call(db, "GET", "/fapi/v2/positionRisk", client, error=str(e))
+
 	# Exchange info (logla)
 	try:
 		ex_info = client.exchange_info()
