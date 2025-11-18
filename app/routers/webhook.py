@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.orm import Session
 from typing import Dict, Any
 import httpx
+import math
 
 from .. import schemas, models
 from ..database import SessionLocal
@@ -162,8 +163,9 @@ async def handle_tradingview(
 			_log_binance_call(db, "GET", "/fapi/v2/balance", client, error=str(e))
 			raise HTTPException(status_code=400, detail=f"Balance alınamadı: {e}")
 
-	# Kaldıraç seçimi ve fiyat (Binance'den güncel fiyat çek)
-	leverage = runtime.select_leverage(settings, symbol, payload.leverage)
+	# Kaldıraç seçimi: Her zaman runtime'daki varsayılan (default) kaldıracı kullan
+	leverage = int(runtime.default_leverage or settings.default_leverage or 1)
+	
 	try:
 		price = client.ticker_price(symbol)
 		_log_binance_call(db, "GET", "/fapi/v1/ticker/price", client, response_data={"symbol": symbol, "price": price})
@@ -173,12 +175,16 @@ async def handle_tradingview(
 		_log_binance_call(db, "GET", "/fapi/v1/ticker/price", client, error=str(e))
 		raise HTTPException(status_code=400, detail=f"Fiyat bilgisi alınamadı: {e}")
 
-	# Quantity hesaplama: Available balance'ın %10'u
+	# Quantity hesaplama: Available balance'ın %10'u veya fixed tutar
 	filters = get_symbol_filters(ex_info, symbol)
 	step = filters["stepSize"] or 0.0001
 	
-	# Available balance'ın %10'u ile işlem yapacağız
-	trade_amount_usdt = available_balance * 0.10
+	# Eğer fixed_trade_amount ayarlıysa onu kullan, yoksa bakiyenin %10'u
+	if runtime.fixed_trade_amount and runtime.fixed_trade_amount > 0:
+		trade_amount_usdt = float(runtime.fixed_trade_amount)
+	else:
+		# Available balance'ın %10'u ile işlem yapacağız
+		trade_amount_usdt = available_balance * 0.10
 	
 	# Kaldıraçla notional hesaplama
 	lev = max(1, int(leverage or 1))
@@ -188,11 +194,23 @@ async def handle_tradingview(
 	base_qty = notional / price
 	base_qty = round_step(base_qty, step)
 	
-	if base_qty <= 0 or base_qty < filters["minQty"]:
+	# Precision hatasını önlemek için (1.300000001 gibi) tekrar string formatlayıp float'a çevirelim
+	# stepSize'ın ondalık basamak sayısını string analiziyle bul (daha güvenli)
+	# "0.00100000" -> "0.001" -> precision=3
+	step_str = "{:.8f}".format(step).rstrip('0')
+	precision = 0
+	if "." in step_str:
+		precision = len(step_str.split(".")[1])
+	
+	# round_step zaten matematiksel yuvarlıyor ama float point hatası kalabiliyor.
+	# Tekrar string format ile "temizle"
+	formatted_qty = "{:.{p}f}".format(base_qty, p=precision)
+	order_qty = float(formatted_qty)
+	
+	if order_qty <= 0 or order_qty < filters["minQty"]:
 		raise HTTPException(status_code=400, detail="Hesaplanan quantity minimum lot size'dan küçük")
 
 	# Pozisyon kontrolü: Ters yönde pozisyon varsa 2x quantity
-	order_qty = base_qty
 	has_opposite_position = False
 	
 	try:
@@ -216,12 +234,12 @@ async def handle_tradingview(
 	
 	# Ters pozisyon varsa 2x, yoksa 1x
 	if has_opposite_position:
-		order_qty = base_qty * 2
-	else:
-		order_qty = base_qty
+		order_qty = order_qty * 2
 	
-	# Adım hassasiyetine göre miktarı yuvarla
+	# Tekrar precision uygula (2x yapınca bozulabilir)
 	order_qty = round_step(order_qty, step)
+	formatted_qty = "{:.{p}f}".format(order_qty, p=precision)
+	order_qty = float(formatted_qty)
 
 	# Kaldıraç braketi (maxNotional) kontrolü: -2027'yi önlemek için miktarı sınırla
 	bracket_warn = None
@@ -247,7 +265,11 @@ async def handle_tradingview(
 			# Yeni notional değeri max'ı aşıyorsa sınırla
 			if new_notional > max_notional and max_notional > 0:
 				allowed_qty = (max_notional / price) if price > 0 else 0.0
-				order_qty = round_step(allowed_qty, step)
+				# Tekrar precision uygula
+				allowed_qty = round_step(allowed_qty, step)
+				formatted_allowed = "{:.{p}f}".format(allowed_qty, p=precision)
+				order_qty = float(formatted_allowed)
+				
 				bracket_warn = f"Qty braket ile sınırlandı: maxNotional={max_notional}, price={price}, allowed_qty={order_qty}"
 	except Exception as e:
 		_log_binance_call(db, "GET", "/fapi/v2/positionRisk", client, error=str(e))
@@ -291,6 +313,31 @@ async def handle_tradingview(
 					extra = e.response.text
 			err_msg = f"Leverage ayarlanamadı: {e}" + (f" | Binance: {extra}" if extra else "")
 			_log_binance_call(db, "POST", "/fapi/v1/leverage", client, error=err_msg)
+			
+			# Hata durumunda Telegram bildirimi
+			try:
+				import json
+				error_lines = [
+					"❌ Leverage Ayarlanamadı",
+					"",
+					f"Symbol: {symbol}",
+					f"Target Leverage: {leverage}",
+					"",
+					"⚠️ Hata Detayı:",
+					f"{str(e)}",
+					"",
+					"📝 Binance Response (Error):",
+				]
+				if extra:
+					try:
+						formatted_extra = json.dumps(extra, indent=2)
+						error_lines.append(f"<pre>{formatted_extra}</pre>")
+					except:
+						error_lines.append(str(extra))
+				notifier.send_message("\n".join(error_lines))
+			except:
+				pass
+
 			raise HTTPException(status_code=400, detail=err_msg)
 		
 		# Isolated margin ayarla
@@ -327,6 +374,34 @@ async def handle_tradingview(
 					extra = e.response.text
 			err_msg = f"Emir başarısız: {e}" + (f" | Binance: {extra}" if extra else "")
 			_log_binance_call(db, "POST", "/fapi/v1/order", client, error=err_msg)
+			
+			# Hata durumunda Telegram bildirimi
+			try:
+				import json
+				error_lines = [
+					"❌ İşlem Başarısız",
+					"",
+					f"Symbol: {symbol}",
+					f"Side: {side}",
+					f"Quantity: {order_qty}",
+					"",
+					"⚠️ Hata Detayı:",
+					f"{str(e)}",
+					"",
+					"📝 Binance Response (Error):",
+				]
+				
+				if extra:
+					try:
+						formatted_extra = json.dumps(extra, indent=2)
+						error_lines.append(f"<pre>{formatted_extra}</pre>")
+					except:
+						error_lines.append(str(extra))
+				
+				notifier.send_message("\n".join(error_lines))
+			except:
+				pass
+				
 			raise HTTPException(status_code=400, detail=err_msg)
 
 	# Save order record
@@ -404,6 +479,17 @@ async def handle_tradingview(
 		
 		if bracket_warn:
 			msg_lines.append(f"⚠️ {bracket_warn}")
+		
+		# Add raw Binance response
+		msg_lines.append("")
+		msg_lines.append("📝 Binance Response:")
+		import json
+		try:
+			# Pretty print JSON
+			formatted_response = json.dumps(order_response, indent=2)
+			msg_lines.append(f"<pre>{formatted_response}</pre>")
+		except Exception:
+			msg_lines.append(str(order_response))
 		
 		notifier.send_message("\n".join(msg_lines))
 	except Exception:

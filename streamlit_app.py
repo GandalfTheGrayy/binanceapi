@@ -335,19 +335,14 @@ with sec_runtime:
             help="Boş: değişiklik yapma"
         )
         default_leverage = st.number_input("Varsayılan Kaldıraç", min_value=1, max_value=125, value=int(current.get("default_leverage", 5)))
-        leverage_per_symbol_str = st.text_input("Sembole Göre Kaldıraç (örn. BTCUSDT:7,ETHUSDT:5)")
-        allocation_cap_usd = st.number_input("Toplam USD Limit (cap)", min_value=0.0, value=float(current.get("allocation_cap_usd") or 0.0))
-        per_trade_pct = st.number_input("Her İşlem %", min_value=0.0, max_value=100.0, value=float(current.get("per_trade_pct", 10.0)))
+        fixed_trade_amount = st.number_input("Sabit İşlem Tutarı ($)", min_value=0.0, value=float(current.get("fixed_trade_amount") or 0.0), help="0 ise yüzde ayarını kullanır")
         submitted = st.form_submit_button("Kaydet")
         if submitted:
             payload = {}
             if leverage_policy:
                 payload["leverage_policy"] = leverage_policy
             payload["default_leverage"] = int(default_leverage)
-            if leverage_per_symbol_str:
-                payload["leverage_per_symbol_str"] = leverage_per_symbol_str
-            payload["allocation_cap_usd"] = float(allocation_cap_usd)
-            payload["per_trade_pct"] = float(per_trade_pct)
+            payload["fixed_trade_amount"] = float(fixed_trade_amount)
             res = post_json("/api/admin/runtime", payload)
             if res.get("success"):
                 st.success("Güncellendi")

@@ -63,6 +63,9 @@
 					<label style="margin-left:8px;">Her İşlem %
 						<input id="perTradePct" type="number" min="0" max="100" step="0.1" placeholder="örn. 10" />
 					</label>
+					<label style="margin-left:8px;">Sabit İşlem Tutarı ($)
+						<input id="fixedTradeAmount" type="number" min="0" step="0.1" placeholder="örn. 100" />
+					</label>
 					<button id="riskSave" style="margin-left:8px;">Kaydet</button>
 					<button id="resetUsed" type="button" style="margin-left:8px;background:#e53935;color:#fff;">Kullanılan Limiti Sıfırla</button>
 				</form>
@@ -132,6 +135,8 @@
 								<div class="pre-box">${js.allocation_cap_usd ?? 0}</div>
 								<div class="label">Her İşlem %</div>
 								<div class="pre-box">${js.per_trade_pct ?? 0}</div>
+								<div class="label">Sabit İşlem Tutarı ($)</div>
+								<div class="pre-box">${js.fixed_trade_amount ?? 0}</div>
 							</div>`;
 						SB_openModal('Risk Ayarı', html);
 					}catch(e){ SB_openModal('Risk Ayarı', `<div class="pre-box">Hata: ${e}</div>`); }
@@ -328,17 +333,24 @@
 			.then(rt => {
 				const capEl = document.getElementById('allocationCapUsd');
 				const pctEl = document.getElementById('perTradePct');
+				const fixedEl = document.getElementById('fixedTradeAmount');
 				if(capEl) capEl.value = rt.allocation_cap_usd ?? '';
 				if(pctEl) pctEl.value = rt.per_trade_pct ?? 10;
+				if(fixedEl) fixedEl.value = rt.fixed_trade_amount ?? 0;
 			})
 			.catch(() => {});
 	})();
 	document.getElementById('riskSave').addEventListener('click', async ()=>{
 		const cap = document.getElementById('allocationCapUsd').value;
 		const pct = document.getElementById('perTradePct').value;
+		const fixed = document.getElementById('fixedTradeAmount').value;
 		await fetch('/api/admin/runtime',{
 			method:'POST',headers:{'content-type':'application/json'},
-			body: JSON.stringify({ allocation_cap_usd: cap ? Number(cap) : 0, per_trade_pct: pct ? Number(pct) : 10 })
+			body: JSON.stringify({ 
+				allocation_cap_usd: cap ? Number(cap) : 0, 
+				per_trade_pct: pct ? Number(pct) : 10,
+				fixed_trade_amount: fixed ? Number(fixed) : 0
+			})
 		});
 		alert('Risk ayarları güncellendi');
 	});

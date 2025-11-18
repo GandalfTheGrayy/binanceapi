@@ -12,6 +12,7 @@ class Settings(BaseSettings):
 	allocation_pct: float = Field(default=50, alias="ALLOCATION_PCT")
 	default_leverage: int = Field(default=5, alias="DEFAULT_LEVERAGE")
 	per_trade_pct: float = Field(default=10, alias="PER_TRADE_PCT")
+	fixed_trade_amount: float = Field(default=0, alias="FIXED_TRADE_AMOUNT")
 	symbols_whitelist_raw: str = Field(default="BTCUSDT,ETHUSDT", alias="SYMBOLS_WHITELIST")
 	dry_run: bool = Field(default=True, alias="DRY_RUN")
 

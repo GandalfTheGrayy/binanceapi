@@ -16,6 +16,7 @@ from .state import runtime
 from .services.ws_manager import ws_manager
 import socket
 from .services.order_sizing import get_symbol_filters, round_step
+from .services.risk_manager import check_early_losses
 import os
 import httpx
 import asyncio
@@ -213,6 +214,8 @@ def on_startup():
     scheduler.add_job(heartbeat_job, "interval", hours=1, id="heartbeat_job", replace_existing=True)
     # Saatlik PnL raporu
     scheduler.add_job(hourly_pnl_job, "interval", hours=1, id="hourly_pnl_job", replace_existing=True)
+    # Erken zarar kesme kontrolü (Her 15 dk)
+    scheduler.add_job(check_early_losses, "interval", minutes=15, id="check_early_losses_job", replace_existing=True)
     scheduler.start()
     
     # Bot başlatıldığında hemen test mesajı gönder
@@ -434,6 +437,17 @@ async def set_runtime_config(payload: dict):
     # Also update the database with the new runtime config if needed
     # (For now, we just keep it in memory)
     return data
+
+# Add admin alias to fix 403/404 issues with frontend
+@app.get("/api/admin/runtime")
+async def get_admin_runtime_config():
+    return runtime.to_dict()
+
+@app.post("/api/admin/runtime")
+async def set_admin_runtime_config(payload: dict):
+    runtime.set_from_dict(payload)
+    return {"success": True, "data": runtime.to_dict()}
+
 
 
 @app.post("/api/admin/reset-used")
