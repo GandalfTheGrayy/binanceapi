@@ -214,8 +214,8 @@ def on_startup():
     scheduler.add_job(heartbeat_job, "interval", hours=1, id="heartbeat_job", replace_existing=True)
     # Saatlik PnL raporu
     scheduler.add_job(hourly_pnl_job, "interval", hours=1, id="hourly_pnl_job", replace_existing=True)
-    # Erken zarar kesme kontrolü (Her 15 dk)
-    scheduler.add_job(check_early_losses, "interval", minutes=15, id="check_early_losses_job", replace_existing=True)
+    # Erken zarar kesme kontrolü (Her 15 dk) - Şimdilik pasif
+    # scheduler.add_job(check_early_losses, "interval", minutes=15, id="check_early_losses_job", replace_existing=True)
     scheduler.start()
     
     # Bot başlatıldığında hemen test mesajı gönder
