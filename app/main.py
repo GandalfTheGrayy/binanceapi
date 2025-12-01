@@ -620,7 +620,7 @@ async def test_binance_connectivity():
             api_secret=settings.binance_api_secret,
             base_url=settings.binance_base_url
         )
-        result = client.test_connectivity()
+        result = await client.test_connectivity()
         # Log
         db = SessionLocal()
         try:
@@ -652,7 +652,7 @@ async def get_binance_account():
             api_secret=settings.binance_api_secret,
             base_url=settings.binance_base_url
         )
-        balances = client.account_usdt_balances()
+        balances = await client.account_usdt_balances()
         # Log
         db = SessionLocal()
         try:
@@ -684,7 +684,7 @@ async def get_binance_positions():
             api_secret=settings.binance_api_secret,
             base_url=settings.binance_base_url
         )
-        positions = client.positions()
+        positions = await client.positions()
         # Log
         db = SessionLocal()
         try:
@@ -713,7 +713,7 @@ async def get_binance_price(symbol: str):
             api_secret=settings.binance_api_secret,
             base_url=settings.binance_base_url
         )
-        price = client.ticker_price(symbol.upper())
+        price = await client.ticker_price(symbol.upper())
         return {"success": True, "symbol": symbol.upper(), "price": price}
     except Exception as e:
         return {"success": False, "error": str(e)}
@@ -794,7 +794,7 @@ async def create_binance_order(payload: schemas.TradingViewWebhook):
             return {"success": False, "error": "Geçerli bir fiyat gerekli"}
         
         # Exchange info ile lot doğrulaması ve qty yuvarlama
-        ex_info = client.exchange_info()
+        ex_info = await client.exchange_info()
         filters = get_symbol_filters(ex_info, symbol)
         step = float(filters.get("stepSize", 0.0) or 0.0)
         min_qty = float(filters.get("minQty", 0.0) or 0.0)
@@ -808,7 +808,7 @@ async def create_binance_order(payload: schemas.TradingViewWebhook):
         # Hedge modu ise positionSide belirle
         position_side = None
         try:
-            pm = client.position_mode()
+            pm = await client.position_mode()
             if bool(pm.get("dualSidePosition")):
                 position_side = "LONG" if side == "BUY" else "SHORT"
         except Exception:
@@ -830,11 +830,11 @@ async def create_binance_order(payload: schemas.TradingViewWebhook):
             # Gerçek emir
             try:
                 # Leverage ayarla
-                resp1 = client.set_leverage(symbol, leverage)
+                resp1 = await client.set_leverage(symbol, leverage)
                 _log_binance_call(db, "POST", "/fapi/v1/leverage", client, response_data=resp1)
                 
                 # Market emri ver (yuvarlanmış qty ile)
-                order_response = client.place_market_order(symbol, side, qty_rounded, position_side=position_side)
+                order_response = await client.place_market_order(symbol, side, qty_rounded, position_side=position_side)
                 _log_binance_call(db, "POST", "/fapi/v1/order", client, response_data=order_response)
                 
                 # orderId yoksa uyarı olarak döndür
