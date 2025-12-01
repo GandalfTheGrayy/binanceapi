@@ -654,6 +654,7 @@ async def get_binance_price(symbol: str):
 # Alias: support query-style access as used by some frontends
 @app.get("/api/binance/price")
 async def get_binance_price_query(symbol: str):
+    # Doğrudan bir coroutine döndürmek yerine, sonucunu bekleyip (await) döndürüyoruz
     return await get_binance_price(symbol)
 
 
