@@ -137,16 +137,30 @@ def hourly_pnl_job():
         client = BinanceFuturesClient(settings.binance_api_key, settings.binance_api_secret, settings.binance_base_url)
         notifier = TelegramNotifier(settings.telegram_bot_token, settings.telegram_chat_id)
 
-        # Try to fetch real balances, fallback to last snapshot
+        # Asenkron verileri çekmek için yardımcı fonksiyon
+        async def fetch_data():
+            try:
+                balances_task = client.account_usdt_balances()
+                positions_task = client.positions()
+                return await asyncio.gather(balances_task, positions_task)
+            except Exception as e:
+                print(f"Data fetch error: {e}")
+                return {}, []
+
+        # Try to fetch real balances and positions
         wallet = 0.0
         available = 0.0
-        try:
-            if settings.binance_api_key and settings.binance_api_secret and not settings.dry_run:
-                acct = client.account_usdt_balances()
+        positions = []
+        
+        if settings.binance_api_key and settings.binance_api_secret and not settings.dry_run:
+            try:
+                # Run async tasks in sync context
+                acct, positions = asyncio.run(fetch_data())
                 wallet = acct.get("wallet", 0.0)
                 available = acct.get("available", 0.0)
-        except Exception:
-            pass
+            except Exception as e:
+                print(f"Async execution error: {e}")
+                pass
 
         last_snap = db.query(models.BalanceSnapshot).order_by(models.BalanceSnapshot.id.desc()).first()
         used = last_snap.used_allocation_usd if last_snap else 0.0
@@ -170,9 +184,57 @@ def hourly_pnl_job():
         prev_snap = db.query(models.BalanceSnapshot).order_by(models.BalanceSnapshot.id.desc()).offset(1).first()
         pnl_1h = (wallet - (prev_snap.total_wallet_balance if prev_snap else wallet))
 
-        notifier.send_message(
-            f"Saatlik Rapor\nWallet: {wallet:.2f} USDT\nAvailable: {available:.2f} USDT\nUsed: {used:.2f} USDT\nPNL 1h: {pnl_1h:.2f} USDT\nPNL Total: {pnl_total:.2f} USDT"
+        msg = (
+            f"Saatlik Rapor\n"
+            f"Wallet: {wallet:.2f} USDT\n"
+            f"Available: {available:.2f} USDT\n"
+            f"Used: {used:.2f} USDT\n"
+            f"PNL 1h: {pnl_1h:.2f} USDT\n"
+            f"PNL Total: {pnl_total:.2f} USDT\n"
         )
+
+        # Açık pozisyonları ekle
+        if positions:
+            msg += "\n📊 Açık Pozisyonlar:\n"
+            for pos in positions:
+                try:
+                    symbol = pos.get("symbol")
+                    amt = float(pos.get("positionAmt", 0.0))
+                    entry_price = float(pos.get("entryPrice", 0.0))
+                    mark_price = float(pos.get("markPrice", 0.0))
+                    unrealized_pnl = float(pos.get("unRealizedProfit", 0.0))
+                    leverage = float(pos.get("leverage", 1.0))
+                    
+                    if amt == 0:
+                        continue
+
+                    side = "LONG" if amt > 0 else "SHORT"
+                    
+                    # PnL Yüzdesi (ROE) hesabı
+                    # ROE % = unrealized_pnl / initial_margin * 100
+                    # initial_margin = (entry_price * abs(amt)) / leverage
+                    # ==> ROE % = (unrealized_pnl * leverage) / (entry_price * abs(amt)) * 100
+                    
+                    initial_margin = (entry_price * abs(amt)) / leverage if leverage > 0 else 0
+                    roe_pct = 0.0
+                    if initial_margin > 0:
+                        roe_pct = (unrealized_pnl / initial_margin) * 100
+                    
+                    # Pozisyon Maliyeti (Cost)
+                    cost = initial_margin
+
+                    msg += (
+                        f"{symbol} ({side})\n"
+                        f"Giriş: {entry_price} | Mark: {mark_price}\n"
+                        f"Miktar: {amt} | Maliyet: ${cost:.2f}\n"
+                        f"Kâr: ${unrealized_pnl:.2f} (%{roe_pct:.2f})\n"
+                        f"----------------\n"
+                    )
+                except Exception as e:
+                    print(f"Error processing position {pos.get('symbol')}: {e}")
+                    continue
+
+        notifier.send_message(msg)
     finally:
         db.close()
 

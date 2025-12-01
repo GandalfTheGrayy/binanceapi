@@ -11,11 +11,20 @@ class BinanceFuturesClient:
 		self.api_key = api_key
 		self.api_secret = api_secret  # Keep as string, encode when needed
 		self.base_url = base_url.rstrip("/")
-		self._client = httpx.Client(base_url=self.base_url, timeout=20.0)
+		self._client = httpx.AsyncClient(base_url=self.base_url, timeout=20.0)
 		self._last_request_debug = None
 		self._last_status_code: Optional[int] = None
 		self._time_offset_ms: int = 0
 		self._time_synced: bool = False
+
+	async def close(self):
+		await self._client.aclose()
+
+	async def __aenter__(self):
+		return self
+
+	async def __aexit__(self, exc_type, exc_val, exc_tb):
+		await self.close()
 
 	def _headers(self) -> Dict[str, str]:
 		return {"X-MBX-APIKEY": self.api_key}
@@ -27,9 +36,9 @@ class BinanceFuturesClient:
 		query = urlencode(params, doseq=True)
 		return hmac.new(self.api_secret.encode('utf-8'), query.encode('utf-8'), hashlib.sha256).hexdigest()
 
-	def _signed_get(self, path: str, params: Optional[Dict[str, Any]] = None) -> httpx.Response:
+	async def _signed_get(self, path: str, params: Optional[Dict[str, Any]] = None) -> httpx.Response:
 		params = params.copy() if params else {}
-		self._ensure_time_sync()
+		await self._ensure_time_sync()
 		params.setdefault("timestamp", self._timestamp())
 		params.setdefault("recvWindow", 10000)
 		sig = self._sign(params)
@@ -48,13 +57,13 @@ class BinanceFuturesClient:
 			"signature_input": query_string
 		}
 		
-		resp = self._client.get(path, params=params, headers=self._headers())
+		resp = await self._client.get(path, params=params, headers=self._headers())
 		self._last_status_code = resp.status_code
 		return resp
 
-	def _signed_post(self, path: str, params: Optional[Dict[str, Any]] = None) -> httpx.Response:
+	async def _signed_post(self, path: str, params: Optional[Dict[str, Any]] = None) -> httpx.Response:
 		params = params.copy() if params else {}
-		self._ensure_time_sync()
+		await self._ensure_time_sync()
 		params.setdefault("timestamp", self._timestamp())
 		params.setdefault("recvWindow", 10000)
 		sig = self._sign(params)
@@ -73,30 +82,30 @@ class BinanceFuturesClient:
 			"signature_input": query_string
 		}
 		
-		resp = self._client.post(path, data=params, headers=self._headers())
+		resp = await self._client.post(path, data=params, headers=self._headers())
 		self._last_status_code = resp.status_code
 		return resp
 
-	def test_connectivity(self) -> Dict[str, Any]:
-		resp = self._client.get("/fapi/v1/ping")
+	async def test_connectivity(self) -> Dict[str, Any]:
+		resp = await self._client.get("/fapi/v1/ping")
 		self._last_status_code = resp.status_code
 		resp.raise_for_status()
 		return resp.json() if resp.text else {}
 
-	def server_time(self) -> int:
+	async def server_time(self) -> int:
 		"""Return server time in milliseconds."""
-		resp = self._client.get("/fapi/v1/time")
+		resp = await self._client.get("/fapi/v1/time")
 		self._last_status_code = resp.status_code
 		resp.raise_for_status()
 		data = resp.json()
 		return int(data.get("serverTime", 0))
 
-	def _ensure_time_sync(self) -> None:
+	async def _ensure_time_sync(self) -> None:
 		"""Sync local offset to Binance server time once to avoid timestamp 400s."""
 		if self._time_synced:
 			return
 		try:
-			server_ts = self.server_time()
+			server_ts = await self.server_time()
 			local_ts = int(time.time() * 1000)
 			self._time_offset_ms = server_ts - local_ts
 			self._time_synced = True
@@ -105,16 +114,16 @@ class BinanceFuturesClient:
 			self._time_offset_ms = 0
 			self._time_synced = True
 
-	def exchange_info(self) -> Dict[str, Any]:
-		resp = self._client.get("/fapi/v1/exchangeInfo")
+	async def exchange_info(self) -> Dict[str, Any]:
+		resp = await self._client.get("/fapi/v1/exchangeInfo")
 		self._last_status_code = resp.status_code
 		resp.raise_for_status()
 		return resp.json()
 
-	def account_usdt_balances(self) -> Dict[str, float]:
+	async def account_usdt_balances(self) -> Dict[str, float]:
 		"""Return wallet and available USDT balances for USDT-M futures."""
 		try:
-			resp = self._signed_get("/fapi/v2/balance")
+			resp = await self._signed_get("/fapi/v2/balance")
 			self._last_status_code = resp.status_code
 			resp.raise_for_status()
 			assets = resp.json()
@@ -128,7 +137,7 @@ class BinanceFuturesClient:
 			return {"wallet": 0.0, "available": 0.0}
 		except httpx.HTTPStatusError:
 			# Some Testnet environments return 400 for v2; fallback to v3
-			resp2 = self._signed_get("/fapi/v3/account")
+			resp2 = await self._signed_get("/fapi/v3/account")
 			self._last_status_code = resp2.status_code
 			resp2.raise_for_status()
 			data = resp2.json()
@@ -145,18 +154,18 @@ class BinanceFuturesClient:
 				"available": float(data.get("availableBalance", 0.0)),
 			}
 
-	def set_leverage(self, symbol: str, leverage: int) -> Dict[str, Any]:
-		resp = self._signed_post("/fapi/v1/leverage", {"symbol": symbol, "leverage": leverage})
+	async def set_leverage(self, symbol: str, leverage: int) -> Dict[str, Any]:
+		resp = await self._signed_post("/fapi/v1/leverage", {"symbol": symbol, "leverage": leverage})
 		resp.raise_for_status()
 		return resp.json()
 
-	def set_margin_type(self, symbol: str, margin_type: str) -> Dict[str, Any]:
+	async def set_margin_type(self, symbol: str, margin_type: str) -> Dict[str, Any]:
 		"""Set margin type for a symbol. margin_type: 'ISOLATED' or 'CROSSED'"""
-		resp = self._signed_post("/fapi/v1/marginType", {"symbol": symbol, "marginType": margin_type})
+		resp = await self._signed_post("/fapi/v1/marginType", {"symbol": symbol, "marginType": margin_type})
 		resp.raise_for_status()
 		return resp.json()
 
-	def place_market_order(self, symbol: str, side: str, quantity: float, position_side: Optional[str] = None) -> Dict[str, Any]:
+	async def place_market_order(self, symbol: str, side: str, quantity: float, position_side: Optional[str] = None) -> Dict[str, Any]:
 		params: Dict[str, Any] = {
 			"symbol": symbol,
 			"side": side,
@@ -165,13 +174,13 @@ class BinanceFuturesClient:
 		}
 		if position_side:
 			params["positionSide"] = position_side
-		resp = self._signed_post("/fapi/v1/order", params)
+		resp = await self._signed_post("/fapi/v1/order", params)
 		resp.raise_for_status()
 		return resp.json()
 
-	def positions(self, symbols: Optional[List[str]] = None) -> List[Dict[str, Any]]:
+	async def positions(self, symbols: Optional[List[str]] = None) -> List[Dict[str, Any]]:
 		"""Return current positions; if symbols provided, filter accordingly."""
-		resp = self._signed_get("/fapi/v2/positionRisk")
+		resp = await self._signed_get("/fapi/v2/positionRisk")
 		resp.raise_for_status()
 		data = resp.json()
 		result: List[Dict[str, Any]] = []
@@ -186,23 +195,23 @@ class BinanceFuturesClient:
 				continue
 		return result
 
-	def position_mode(self) -> Dict[str, Any]:
+	async def position_mode(self) -> Dict[str, Any]:
 		"""Return position mode info: {"dualSidePosition": bool}"""
-		resp = self._signed_get("/fapi/v1/positionSide/dual")
+		resp = await self._signed_get("/fapi/v1/positionSide/dual")
 		resp.raise_for_status()
 		return resp.json()
 
-	def set_position_mode(self, dual: bool) -> Dict[str, Any]:
+	async def set_position_mode(self, dual: bool) -> Dict[str, Any]:
 		"""Set position mode. dual=True => Hedge (dual-side), dual=False => One-way."""
 		# Binance expects a string 'true'/'false'
 		val = "true" if dual else "false"
-		resp = self._signed_post("/fapi/v1/positionSide/dual", {"dualSidePosition": val})
+		resp = await self._signed_post("/fapi/v1/positionSide/dual", {"dualSidePosition": val})
 		resp.raise_for_status()
 		return resp.json()
 
-	def position_risk(self, symbols: Optional[List[str]] = None) -> List[Dict[str, Any]]:
+	async def position_risk(self, symbols: Optional[List[str]] = None) -> List[Dict[str, Any]]:
 		"""Return raw position risk entries (including zero positions) to read maxNotionalValue etc."""
-		resp = self._signed_get("/fapi/v2/positionRisk")
+		resp = await self._signed_get("/fapi/v2/positionRisk")
 		resp.raise_for_status()
 		data = resp.json()
 		if symbols:
@@ -217,9 +226,9 @@ class BinanceFuturesClient:
 		return self._last_status_code
 
 	# Yeni: halka açık fiyat (ticker) endpointi
-	def ticker_price(self, symbol: str) -> float:
+	async def ticker_price(self, symbol: str) -> float:
 		"""Return latest price for a symbol from /fapi/v1/ticker/price"""
-		resp = self._client.get("/fapi/v1/ticker/price", params={"symbol": symbol})
+		resp = await self._client.get("/fapi/v1/ticker/price", params={"symbol": symbol})
 		self._last_status_code = resp.status_code
 		resp.raise_for_status()
 		data = resp.json()
