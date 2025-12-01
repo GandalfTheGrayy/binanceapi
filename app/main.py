@@ -155,7 +155,46 @@ def hourly_pnl_job():
         if settings.binance_api_key and settings.binance_api_secret and not settings.dry_run:
             try:
                 # Run async tasks in sync context
-                acct, positions = asyncio.run(fetch_data())
+                # Eğer çalışan bir event loop varsa onu kullan, yoksa yeni bir tane oluştur
+                try:
+                    loop = asyncio.get_event_loop()
+                except RuntimeError:
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+                
+                if loop.is_running():
+                    # Eğer zaten running bir loop içindeysek (örneğin on_startup içinden çağrıldığında)
+                    # doğrudan çağırmak yerine create_task kullanamayız çünkü sonucu beklememiz lazım.
+                    # Ancak burası senkron bir fonksiyon.
+                    # Bu yüzden, eğer loop çalışıyorsa ve bu fonksiyon senkron ise, bu bir tasarım sorunu olabilir.
+                    # Ancak pratik çözüm: nest_asyncio veya thread içinde çalıştırmak.
+                    # Burada basitçe loop.run_until_complete kullanamayız çünkü loop zaten run ediyor.
+                    
+                    # Çözüm: Eğer on_startup (async) içinden çağrılıyorsa, bu fonksiyon da async olmalıydı.
+                    # Ancak APScheduler senkron çağırıyor.
+                    
+                    # APScheduler ThreadPoolExecutor kullandığı için genellikle ayrı thread'de çalışır
+                    # ve orada running loop olmaz. Ancak on_startup içinde ana thread'deyiz.
+                    
+                    # Hızlı çözüm: Sadece startup'ta çağrıldığında sorun çıkıyor.
+                    # Startup için ayrı bir logic veya future kullanımı gerekebilir.
+                    # Şimdilik asyncio.run() yerine, mevcut loop varsa create_task ile "fire and forget" yapabiliriz
+                    # ama sonucu bekleyip DB'ye yazmak istiyoruz.
+                    
+                    # En temiz çözüm: Bu işi yapan fonksiyonu async yapıp, scheduler'a async job olarak eklemek.
+                    # APScheduler AsyncIOScheduler destekliyor mu? Evet ama biz BackgroundScheduler kullanıyoruz.
+                    # BackgroundScheduler senkron fonksiyon bekler.
+                    
+                    # O zaman: run_coroutine_threadsafe kullanarak başka bir thread'deki loop'a iş yaptırmak
+                    # veya yeni bir event loop'u, yeni bir thread'de çalıştırmak.
+                    
+                    import concurrent.futures
+                    with concurrent.futures.ThreadPoolExecutor() as executor:
+                         future = executor.submit(asyncio.run, fetch_data())
+                         acct, positions = future.result()
+                else:
+                     acct, positions = asyncio.run(fetch_data())
+
                 wallet = acct.get("wallet", 0.0)
                 available = acct.get("available", 0.0)
             except Exception as e:
@@ -233,8 +272,21 @@ def hourly_pnl_job():
                 except Exception as e:
                     print(f"Error processing position {pos.get('symbol')}: {e}")
                     continue
-
-        notifier.send_message(msg)
+        
+        # Telegram mesajını gönder (async wrapper ile)
+        try:
+            asyncio.run(notifier.send_message(msg))
+        except RuntimeError:
+            # Eğer running loop varsa (startup durumunda)
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                # Sadece task oluştur, sonucu bekleme (zaten logluyor)
+                loop.create_task(notifier.send_message(msg))
+            else:
+                # Fallback
+                pass
+    except Exception as e:
+        print(f"Hourly job error: {e}")
     finally:
         db.close()
 
