@@ -284,6 +284,8 @@ def on_startup():
     try:
         notifier = TelegramNotifier(settings.telegram_bot_token, settings.telegram_chat_id)
         notifier.send_message("🚀 Bot başlatıldı ve çalışıyor!")
+        # İlk raporu da gönder
+        hourly_pnl_job()
     except Exception as e:
         print(f"[Startup] Telegram test mesajı gönderilemedi: {e}")
 
