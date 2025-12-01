@@ -233,6 +233,9 @@ def hourly_pnl_job():
         )
 
         # Açık pozisyonları ekle
+        total_unrealized_pnl = 0.0
+        total_position_cost = 0.0
+
         if positions:
             msg += "\n📊 Açık Pozisyonlar:\n"
             for pos in positions:
@@ -261,6 +264,10 @@ def hourly_pnl_job():
                     
                     # Pozisyon Maliyeti (Cost)
                     cost = initial_margin
+                    
+                    # Toplamları güncelle
+                    total_unrealized_pnl += unrealized_pnl
+                    total_position_cost += cost
 
                     msg += (
                         f"{symbol} ({side})\n"
@@ -272,6 +279,14 @@ def hourly_pnl_job():
                 except Exception as e:
                     print(f"Error processing position {pos.get('symbol')}: {e}")
                     continue
+            
+            # Tüm pozisyonlar kapanırsa tahmini toplam bakiye
+            # Mevcut cüzdan bakiyesi (wallet) zaten gerçekleşmiş PnL'i içerir ama unrealized PnL'i içermez.
+            # Binance'de "Wallet Balance" gerçekleşmiş kar/zararı içerir.
+            # "Margin Balance" = Wallet Balance + Unrealized PNL şeklindedir.
+            # Dolayısıyla tüm pozisyonlar kapanırsa bakiye = Wallet Balance + Total Unrealized PnL olur.
+            estimated_balance = wallet + total_unrealized_pnl
+            msg += f"\n💰 Tahmini Toplam Bakiye: {estimated_balance:.2f} USDT\n(Pozisyonlar şu an kapanırsa)"
         
         # Telegram mesajını gönder (async wrapper ile)
         try:
