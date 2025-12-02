@@ -37,6 +37,8 @@ class BalanceSnapshot(Base):
 	total_wallet_balance = Column(Float)
 	available_balance = Column(Float)
 	used_allocation_usd = Column(Float, default=0)
+	total_equity = Column(Float, default=0.0)  # Wallet Balance + Unrealized PnL
+	unrealized_pnl = Column(Float, default=0.0)
 	note = Column(Text, nullable=True)
 	created_at = Column(DateTime(timezone=True), server_default=func.now(), index=True)
 

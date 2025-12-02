@@ -21,6 +21,10 @@ import os
 import httpx
 import asyncio
 import websockets
+import io
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
 
 app = FastAPI(title="SerdarBorsa Webhook -> Binance Futures")
 
@@ -155,7 +159,6 @@ def hourly_pnl_job():
         if settings.binance_api_key and settings.binance_api_secret and not settings.dry_run:
             try:
                 # Run async tasks in sync context
-                # Eğer çalışan bir event loop varsa onu kullan, yoksa yeni bir tane oluştur
                 try:
                     loop = asyncio.get_event_loop()
                 except RuntimeError:
@@ -163,31 +166,6 @@ def hourly_pnl_job():
                     asyncio.set_event_loop(loop)
                 
                 if loop.is_running():
-                    # Eğer zaten running bir loop içindeysek (örneğin on_startup içinden çağrıldığında)
-                    # doğrudan çağırmak yerine create_task kullanamayız çünkü sonucu beklememiz lazım.
-                    # Ancak burası senkron bir fonksiyon.
-                    # Bu yüzden, eğer loop çalışıyorsa ve bu fonksiyon senkron ise, bu bir tasarım sorunu olabilir.
-                    # Ancak pratik çözüm: nest_asyncio veya thread içinde çalıştırmak.
-                    # Burada basitçe loop.run_until_complete kullanamayız çünkü loop zaten run ediyor.
-                    
-                    # Çözüm: Eğer on_startup (async) içinden çağrılıyorsa, bu fonksiyon da async olmalıydı.
-                    # Ancak APScheduler senkron çağırıyor.
-                    
-                    # APScheduler ThreadPoolExecutor kullandığı için genellikle ayrı thread'de çalışır
-                    # ve orada running loop olmaz. Ancak on_startup içinde ana thread'deyiz.
-                    
-                    # Hızlı çözüm: Sadece startup'ta çağrıldığında sorun çıkıyor.
-                    # Startup için ayrı bir logic veya future kullanımı gerekebilir.
-                    # Şimdilik asyncio.run() yerine, mevcut loop varsa create_task ile "fire and forget" yapabiliriz
-                    # ama sonucu bekleyip DB'ye yazmak istiyoruz.
-                    
-                    # En temiz çözüm: Bu işi yapan fonksiyonu async yapıp, scheduler'a async job olarak eklemek.
-                    # APScheduler AsyncIOScheduler destekliyor mu? Evet ama biz BackgroundScheduler kullanıyoruz.
-                    # BackgroundScheduler senkron fonksiyon bekler.
-                    
-                    # O zaman: run_coroutine_threadsafe kullanarak başka bir thread'deki loop'a iş yaptırmak
-                    # veya yeni bir event loop'u, yeni bir thread'de çalıştırmak.
-                    
                     import concurrent.futures
                     with concurrent.futures.ThreadPoolExecutor() as executor:
                          future = executor.submit(asyncio.run, fetch_data())
@@ -201,6 +179,7 @@ def hourly_pnl_job():
                 print(f"Async execution error: {e}")
                 pass
 
+        # 1. Get previous data for PnL calcs
         last_snap = db.query(models.BalanceSnapshot).order_by(models.BalanceSnapshot.id.desc()).first()
         used = last_snap.used_allocation_usd if last_snap else 0.0
         if wallet == 0.0:
@@ -208,20 +187,11 @@ def hourly_pnl_job():
         if available == 0.0:
             available = wallet - used
 
-        db.add(models.BalanceSnapshot(
-            total_wallet_balance=wallet,
-            available_balance=available,
-            used_allocation_usd=used,
-            note=f"Hourly snapshot {datetime.utcnow().isoformat()}Z",
-        ))
-        db.commit()
-
         # Simple PnL estimate: change of wallet vs first snapshot in DB
         first_snap = db.query(models.BalanceSnapshot).order_by(models.BalanceSnapshot.id.asc()).first()
         pnl_total = (wallet - first_snap.total_wallet_balance) if first_snap else 0.0
-        # Hourly pnl approx: diff vs last snapshot
-        prev_snap = db.query(models.BalanceSnapshot).order_by(models.BalanceSnapshot.id.desc()).offset(1).first()
-        pnl_1h = (wallet - (prev_snap.total_wallet_balance if prev_snap else wallet))
+        # Hourly pnl approx: diff vs last snapshot (last_snap is the previous one here)
+        pnl_1h = (wallet - last_snap.total_wallet_balance) if last_snap else 0.0
 
         msg = (
             f"Saatlik Rapor\n"
@@ -252,17 +222,11 @@ def hourly_pnl_job():
 
                     side = "LONG" if amt > 0 else "SHORT"
                     
-                    # PnL Yüzdesi (ROE) hesabı
-                    # ROE % = unrealized_pnl / initial_margin * 100
-                    # initial_margin = (entry_price * abs(amt)) / leverage
-                    # ==> ROE % = (unrealized_pnl * leverage) / (entry_price * abs(amt)) * 100
-                    
                     initial_margin = (entry_price * abs(amt)) / leverage if leverage > 0 else 0
                     roe_pct = 0.0
                     if initial_margin > 0:
                         roe_pct = (unrealized_pnl / initial_margin) * 100
                     
-                    # Pozisyon Maliyeti (Cost)
                     cost = initial_margin
                     
                     # Toplamları güncelle
@@ -280,26 +244,83 @@ def hourly_pnl_job():
                     print(f"Error processing position {pos.get('symbol')}: {e}")
                     continue
             
-            # Tüm pozisyonlar kapanırsa tahmini toplam bakiye
-            # Mevcut cüzdan bakiyesi (wallet) zaten gerçekleşmiş PnL'i içerir ama unrealized PnL'i içermez.
-            # Binance'de "Wallet Balance" gerçekleşmiş kar/zararı içerir.
-            # "Margin Balance" = Wallet Balance + Unrealized PNL şeklindedir.
-            # Dolayısıyla tüm pozisyonlar kapanırsa bakiye = Wallet Balance + Total Unrealized PnL olur.
             estimated_balance = wallet + total_unrealized_pnl
             msg += f"\n💰 Tahmini Toplam Bakiye: {estimated_balance:.2f} USDT\n(Pozisyonlar şu an kapanırsa)"
-        
-        # Telegram mesajını gönder (async wrapper ile)
+        else:
+            # No open positions
+            estimated_balance = wallet
+
+        # 2. Save Snapshot with Equity info
+        db.add(models.BalanceSnapshot(
+            total_wallet_balance=wallet,
+            available_balance=available,
+            used_allocation_usd=used,
+            total_equity=estimated_balance,
+            unrealized_pnl=total_unrealized_pnl,
+            note=f"Hourly snapshot {datetime.utcnow().isoformat()}Z",
+        ))
+        db.commit()
+
+        # 3. Generate Graph
+        graph_bio = None
         try:
-            asyncio.run(notifier.send_message(msg))
-        except RuntimeError:
-            # Eğer running loop varsa (startup durumunda)
-            loop = asyncio.get_event_loop()
+            # Fetch last 24h data (or more)
+            last_snaps = db.query(models.BalanceSnapshot).order_by(models.BalanceSnapshot.id.desc()).limit(48).all()
+            last_snaps.reverse() # Oldest first
+            
+            if last_snaps and len(last_snaps) > 1:
+                # Extract data
+                # Create readable labels (just hour)
+                dates = [s.created_at.strftime("%H:%M") for s in last_snaps]
+                equities = [s.total_equity if s.total_equity is not None else s.total_wallet_balance for s in last_snaps]
+                
+                plt.figure(figsize=(10, 5))
+                plt.plot(dates, equities, marker='o', linestyle='-', color='b', markersize=4)
+                
+                plt.title('Toplam Bakiye (Equity) - Son 48 Saat')
+                plt.xlabel('Saat')
+                plt.ylabel('USDT')
+                plt.grid(True, which='both', linestyle='--', linewidth=0.5)
+                
+                # X ekseninde çok fazla etiket olmasın diye filtreleme
+                n = len(dates)
+                if n > 12:
+                    step = n // 12
+                    plt.xticks(range(0, n, step), dates[::step], rotation=45)
+                else:
+                    plt.xticks(rotation=45)
+
+                plt.tight_layout()
+                
+                graph_bio = io.BytesIO()
+                plt.savefig(graph_bio, format='png')
+                graph_bio.seek(0)
+                plt.close()
+        except Exception as e:
+            print(f"Graph generation error: {e}")
+
+        # 4. Send Telegram Message
+        try:
+            # Create async runner helper
+            async def send():
+                if graph_bio:
+                    await notifier.send_photo(graph_bio, caption=msg)
+                else:
+                    await notifier.send_message(msg)
+
+            try:
+                loop = asyncio.get_event_loop()
+            except RuntimeError:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+
             if loop.is_running():
-                # Sadece task oluştur, sonucu bekleme (zaten logluyor)
-                loop.create_task(notifier.send_message(msg))
+                loop.create_task(send())
             else:
-                # Fallback
-                pass
+                asyncio.run(send())
+        except Exception as e:
+            print(f"Telegram send error: {e}")
+
     except Exception as e:
         print(f"Hourly job error: {e}")
     finally:
