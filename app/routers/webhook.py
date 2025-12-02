@@ -258,9 +258,10 @@ async def handle_tradingview(
 		if order_qty <= 0 or order_qty < filters["minQty"]:
 			raise HTTPException(status_code=400, detail="Hesaplanan quantity minimum lot size'dan küçük")
 
-		# Pozisyon kontrolü: Ters yönde pozisyon varsa 2x quantity
-		has_opposite_position = False
-		
+		# Pozisyon kontrolü: Ters yönde pozisyon varsa önce onu kapat
+		closed_position_amount = 0.0
+		closed_position_msg = None
+
 		try:
 			cur_positions = await client.positions([symbol])
 			_log_binance_call(db, "GET", "/fapi/v2/positionRisk", client, response_data=cur_positions)
@@ -268,26 +269,49 @@ async def handle_tradingview(
 			for p in cur_positions:
 				if p.get("symbol") == symbol:
 					amt = float(p.get("positionAmt", 0) or 0)
-					# BUY isteği + SHORT pozisyon = 2x
+					
+					# Eğer ters yönde bir pozisyon varsa kapat
+					opposite_side = None
 					if side == "BUY" and amt < 0:
-						has_opposite_position = True
-					# SELL isteği + LONG pozisyon = 2x
+						opposite_side = "BUY"  # Short'u kapatmak için BUY yapılır
 					elif side == "SELL" and amt > 0:
-						has_opposite_position = True
+						opposite_side = "SELL" # Long'u kapatmak için SELL yapılır
+						
+					if opposite_side:
+						close_qty = abs(amt)
+						closed_position_amount = close_qty
+						
+						if not settings.dry_run:
+							try:
+								# Mevcut pozisyonu kapat (reduce_only=True)
+								close_resp = await client.place_market_order(
+									symbol, 
+									opposite_side, 
+									close_qty, 
+									position_side=position_side if dual_mode else None,
+									reduce_only=True
+								)
+								_log_binance_call(db, "POST", "/fapi/v1/order (close)", client, response_data=close_resp)
+								closed_position_msg = f"Ters pozisyon kapatıldı: {opposite_side} {close_qty}"
+								
+								# Telegram bildirimi (Kapanış)
+								try:
+									await notifier.send_message(f"⚠️ Ters Pozisyon Kapatılıyor\nSymbol: {symbol}\nİşlem: {opposite_side}\nMiktar: {close_qty}\nSebep: Yeni {side} sinyali geldi.")
+								except:
+									pass
+									
+							except Exception as e:
+								_log_binance_call(db, "POST", "/fapi/v1/order (close)", client, error=str(e))
+								# Kapanış hatası olsa bile devam etmeye çalışabiliriz veya hata fırlatabiliriz
+								# Şimdilik loglayıp devam ediyoruz, ama riskli olabilir.
+								await notifier.send_message(f"❌ Ters Pozisyon Kapatılamadı: {e}")
+						else:
+							closed_position_msg = f"[DRY_RUN] Ters pozisyon kapatılacaktı: {opposite_side} {close_qty}"
+
 					break
 		except Exception as e:
 			_log_binance_call(db, "GET", "/fapi/v2/positionRisk", client, error=str(e))
-			# Pozisyonlar okunamazsa 1x quantity ile devam et
 			pass
-		
-		# Ters pozisyon varsa 2x, yoksa 1x
-		if has_opposite_position:
-			order_qty = order_qty * 2
-		
-		# Tekrar precision uygula (2x yapınca bozulabilir)
-		order_qty = round_step(order_qty, step)
-		formatted_qty = "{:.{p}f}".format(order_qty, p=precision)
-		order_qty = float(formatted_qty)
 
 		# Kaldıraç braketi (maxNotional) kontrolü: -2027'yi önlemek için miktarı sınırla
 		bracket_warn = None
@@ -345,7 +369,7 @@ async def handle_tradingview(
 				"note": force_msg,
 				"available_balance": available_balance,
 				"trade_amount_usdt": trade_amount_usdt,
-				"has_opposite_position": has_opposite_position,
+				"closed_position_msg": closed_position_msg,
 			}
 		else:
 			try:
@@ -509,9 +533,9 @@ async def handle_tradingview(
 			f"Kullanılan: {margin_used:.2f} USDT",
 		]
 		
-		if has_opposite_position:
+		if closed_position_msg:
 			msg_lines.append("")
-			msg_lines.append("⚠️ Ters pozisyon var - 2x quantity kullanıldı")
+			msg_lines.append(f"⚠️ {closed_position_msg}")
 		
 		msg_lines.append("")
 		msg_lines.append("📊 Margin Type: ISOLATED")

@@ -165,7 +165,7 @@ class BinanceFuturesClient:
 		resp.raise_for_status()
 		return resp.json()
 
-	async def place_market_order(self, symbol: str, side: str, quantity: float, position_side: Optional[str] = None) -> Dict[str, Any]:
+	async def place_market_order(self, symbol: str, side: str, quantity: float, position_side: Optional[str] = None, reduce_only: bool = False) -> Dict[str, Any]:
 		params: Dict[str, Any] = {
 			"symbol": symbol,
 			"side": side,
@@ -174,6 +174,8 @@ class BinanceFuturesClient:
 		}
 		if position_side:
 			params["positionSide"] = position_side
+		if reduce_only:
+			params["reduceOnly"] = "true"
 		resp = await self._signed_post("/fapi/v1/order", params)
 		resp.raise_for_status()
 		return resp.json()
