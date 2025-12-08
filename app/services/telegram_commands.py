@@ -62,7 +62,7 @@ class TelegramCommandHandler:
 				text = message.get("text", "")
 				chat_id = str(message.get("chat", {}).get("id", ""))
 				
-			if not chat_id:
+				if not chat_id:
 					return
 				
 				# DEBUG: Gelen mesajı logla
