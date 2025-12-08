@@ -391,7 +391,15 @@ def on_startup():
             else:
                 asyncio.run(poll_telegram_updates())
         
-        scheduler.add_job(telegram_poll_job, "interval", seconds=2, id="telegram_poll_job", replace_existing=True)
+        scheduler.add_job(
+            telegram_poll_job, 
+            "interval", 
+            seconds=3, 
+            id="telegram_poll_job", 
+            replace_existing=True,
+            max_instances=1,
+            coalesce=True
+        )
         print("[Startup] Telegram komut polling başlatıldı")
     
     scheduler.start()

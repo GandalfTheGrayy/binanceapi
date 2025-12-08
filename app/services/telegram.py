@@ -10,7 +10,7 @@ class TelegramNotifier:
 		self.last_error = None
 		self.last_update_id = 0
 
-	async def get_updates(self, offset: int = None, timeout: int = 10) -> List[Dict[str, Any]]:
+	async def get_updates(self, offset: int = None, timeout: int = 1) -> List[Dict[str, Any]]:
 		"""
 		Telegram'dan yeni güncellemeleri çeker (long polling).
 		"""
