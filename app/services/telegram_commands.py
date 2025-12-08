@@ -404,6 +404,7 @@ async def _polling_loop():
 	global command_handler, _polling_running
 	
 	print("[TelegramCommandHandler] Polling döngüsü başladı")
+	poll_count = 0
 	
 	while _polling_running:
 		if command_handler is None:
@@ -412,11 +413,20 @@ async def _polling_loop():
 		
 		try:
 			updates = await command_handler.notifier.get_updates(timeout=1)
-			for update in updates:
-				try:
-					await command_handler.handle_update(update)
-				except Exception as e:
-					print(f"[TelegramCommandHandler] Update işleme hatası: {e}")
+			poll_count += 1
+			
+			# Her 10 polling'de bir log bas (sessiz kalmasın)
+			if poll_count % 10 == 0:
+				print(f"[TelegramCommandHandler] Polling aktif... (#{poll_count})")
+			
+			if updates:
+				print(f"[TelegramCommandHandler] {len(updates)} update alındı!")
+				for update in updates:
+					print(f"[TelegramCommandHandler] Update: {update}")
+					try:
+						await command_handler.handle_update(update)
+					except Exception as e:
+						print(f"[TelegramCommandHandler] Update işleme hatası: {e}")
 		except Exception as e:
 			print(f"[TelegramCommandHandler] Polling hatası: {e}")
 		
