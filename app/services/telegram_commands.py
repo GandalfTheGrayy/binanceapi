@@ -62,13 +62,20 @@ class TelegramCommandHandler:
 				text = message.get("text", "")
 				chat_id = str(message.get("chat", {}).get("id", ""))
 				
-				if not chat_id:
+			if not chat_id:
 					return
 				
+				# DEBUG: Gelen mesajı logla
+				print(f"[TelegramCommandHandler] Mesaj alındı - chat_id: '{chat_id}', text: '{text[:50] if text else ''}'")
+				
 				# GÜVENLİK: Sadece .env'de tanımlı chat_id'den gelen mesajları işle
-				allowed_chat_id = self.notifier.chat_id
-				if chat_id != allowed_chat_id:
-					print(f"[TelegramCommandHandler] Yetkisiz chat_id: {chat_id} (izin verilen: {allowed_chat_id})")
+				allowed_chat_id = str(self.notifier.chat_id).strip()
+				incoming_chat_id = str(chat_id).strip()
+				
+				print(f"[TelegramCommandHandler] Karşılaştırma - gelen: '{incoming_chat_id}' vs izinli: '{allowed_chat_id}'")
+				
+				if incoming_chat_id != allowed_chat_id:
+					print(f"[TelegramCommandHandler] Yetkisiz chat_id: {incoming_chat_id} (izin verilen: {allowed_chat_id})")
 					return
 				
 				# !islemler komutu kontrolü
