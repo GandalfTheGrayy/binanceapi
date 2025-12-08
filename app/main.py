@@ -11,7 +11,7 @@ from datetime import datetime
 from .config import get_settings
 from .services.binance_client import BinanceFuturesClient
 from .services.telegram import TelegramNotifier
-from .services.telegram_commands import init_command_handler, poll_telegram_updates
+from .services.telegram_commands import init_command_handler, start_polling_loop, stop_polling_loop
 from . import models, schemas
 from .state import runtime
 from .services.ws_manager import ws_manager
@@ -375,32 +375,10 @@ def on_startup():
     # Erken zarar kesme kontrolü (Her 15 dk) - Şimdilik pasif
     # scheduler.add_job(check_early_losses, "interval", minutes=15, id="check_early_losses_job", replace_existing=True)
     
-    # Telegram komut handler'ını başlat
+    # Telegram komut handler'ını başlat (asyncio task olarak - lifespan'da başlatılacak)
     if settings.telegram_bot_token and settings.telegram_chat_id:
         init_command_handler(settings.telegram_bot_token, settings.telegram_chat_id)
-        # Her 2 saniyede Telegram komutlarını kontrol et
-        def telegram_poll_job():
-            try:
-                loop = asyncio.get_event_loop()
-            except RuntimeError:
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-            
-            if loop.is_running():
-                loop.create_task(poll_telegram_updates())
-            else:
-                asyncio.run(poll_telegram_updates())
-        
-        scheduler.add_job(
-            telegram_poll_job, 
-            "interval", 
-            seconds=3, 
-            id="telegram_poll_job", 
-            replace_existing=True,
-            max_instances=1,
-            coalesce=True
-        )
-        print("[Startup] Telegram komut polling başlatıldı")
+        print("[Startup] Telegram komut handler'ı başlatıldı (polling lifespan'da başlayacak)")
     
     scheduler.start()
     
@@ -428,10 +406,21 @@ def on_startup():
 
 
 @app.on_event("shutdown")
-def on_shutdown():
+async def on_shutdown():
     global scheduler
+    # Telegram polling'i durdur
+    await stop_polling_loop()
     if scheduler:
         scheduler.shutdown(wait=False)
+
+
+# Telegram polling'i başlat (async event loop hazır olduğunda)
+@app.on_event("startup")
+async def on_startup_async():
+    settings = get_settings()
+    if settings.telegram_bot_token and settings.telegram_chat_id:
+        await start_polling_loop()
+        print("[Startup] Telegram polling loop başlatıldı")
 
 # Streamlit proxy — tek servis altında UI'yı aynı domain üzerinden sunmak için
 STREAMLIT_INTERNAL_URL = os.getenv("STREAMLIT_INTERNAL_URL", "http://127.0.0.1:8501").rstrip("/")

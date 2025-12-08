@@ -374,10 +374,70 @@ class TelegramCommandHandler:
 
 # Global command handler instance (will be initialized on startup)
 command_handler: Optional[TelegramCommandHandler] = None
+# Background polling task
+_polling_task: Optional[asyncio.Task] = None
+_polling_running: bool = False
+
+
+async def _polling_loop():
+	"""Sürekli çalışan Telegram polling döngüsü."""
+	global command_handler, _polling_running
+	
+	print("[TelegramCommandHandler] Polling döngüsü başladı")
+	
+	while _polling_running:
+		if command_handler is None:
+			await asyncio.sleep(1)
+			continue
+		
+		try:
+			updates = await command_handler.notifier.get_updates(timeout=1)
+			for update in updates:
+				try:
+					await command_handler.handle_update(update)
+				except Exception as e:
+					print(f"[TelegramCommandHandler] Update işleme hatası: {e}")
+		except Exception as e:
+			print(f"[TelegramCommandHandler] Polling hatası: {e}")
+		
+		# Kısa bekleme
+		await asyncio.sleep(0.5)
+	
+	print("[TelegramCommandHandler] Polling döngüsü durduruldu")
+
+
+async def start_polling_loop():
+	"""Background polling task'ını başlatır."""
+	global _polling_task, _polling_running
+	
+	if _polling_task is not None and not _polling_task.done():
+		print("[TelegramCommandHandler] Polling zaten çalışıyor")
+		return
+	
+	_polling_running = True
+	_polling_task = asyncio.create_task(_polling_loop())
+	print("[TelegramCommandHandler] Polling task başlatıldı")
+
+
+async def stop_polling_loop():
+	"""Background polling task'ını durdurur."""
+	global _polling_task, _polling_running
+	
+	_polling_running = False
+	
+	if _polling_task is not None:
+		_polling_task.cancel()
+		try:
+			await _polling_task
+		except asyncio.CancelledError:
+			pass
+		_polling_task = None
+	
+	print("[TelegramCommandHandler] Polling task durduruldu")
 
 
 async def poll_telegram_updates():
-	"""Telegram güncellemelerini kontrol eder (scheduler tarafından çağrılır)."""
+	"""Tek seferlik polling (geriye uyumluluk için)."""
 	global command_handler
 	
 	if command_handler is None:
