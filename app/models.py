@@ -55,3 +55,14 @@ class BinanceAPILog(Base):
 	response = Column(JSON, nullable=True)
 	error = Column(Text, nullable=True)
 	created_at = Column(DateTime(timezone=True), server_default=func.now(), index=True)
+
+
+class RuntimeSettings(Base):
+	"""Runtime ayarlarını kalıcı olarak saklamak için tablo"""
+	__tablename__ = "runtime_settings"
+
+	id = Column(Integer, primary_key=True, index=True)
+	key = Column(String(64), unique=True, index=True)
+	value = Column(Text)
+	updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+

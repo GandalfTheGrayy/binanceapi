@@ -11,6 +11,7 @@ from datetime import datetime
 from .config import get_settings
 from .services.binance_client import BinanceFuturesClient
 from .services.telegram import TelegramNotifier
+from .services.telegram_commands import init_command_handler, poll_telegram_updates
 from . import models, schemas
 from .state import runtime
 from .services.ws_manager import ws_manager
@@ -330,9 +331,16 @@ def hourly_pnl_job():
 @app.on_event("startup")
 def on_startup():
     init_db()
-    # initialize runtime config from .env settings and expose public url
+    # initialize runtime config: try DB first, fallback to .env settings
     settings = get_settings()
-    runtime.reset_from_settings(settings)
+    db = SessionLocal()
+    try:
+        if not runtime.load_from_db(db):
+            # DB'de ayar yoksa veya hata olursa .env'den yükle
+            print("[Startup] DB'de runtime ayarı bulunamadı, .env'den yükleniyor...")
+            runtime.reset_from_settings(settings)
+    finally:
+        db.close()
     app.state.public_base_url = settings.public_base_url or ""
     # Ensure One-way mode on startup when live
     if settings.binance_api_key and settings.binance_api_secret and not settings.dry_run:
@@ -366,6 +374,26 @@ def on_startup():
     scheduler.add_job(hourly_pnl_job, "interval", hours=1, id="hourly_pnl_job", replace_existing=True)
     # Erken zarar kesme kontrolü (Her 15 dk) - Şimdilik pasif
     # scheduler.add_job(check_early_losses, "interval", minutes=15, id="check_early_losses_job", replace_existing=True)
+    
+    # Telegram komut handler'ını başlat
+    if settings.telegram_bot_token and settings.telegram_chat_id:
+        init_command_handler(settings.telegram_bot_token, settings.telegram_chat_id)
+        # Her 2 saniyede Telegram komutlarını kontrol et
+        def telegram_poll_job():
+            try:
+                loop = asyncio.get_event_loop()
+            except RuntimeError:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+            
+            if loop.is_running():
+                loop.create_task(poll_telegram_updates())
+            else:
+                asyncio.run(poll_telegram_updates())
+        
+        scheduler.add_job(telegram_poll_job, "interval", seconds=2, id="telegram_poll_job", replace_existing=True)
+        print("[Startup] Telegram komut polling başlatıldı")
+    
     scheduler.start()
     
     # Bot başlatıldığında hemen test mesajı gönder
@@ -586,8 +614,12 @@ async def set_runtime_config(payload: dict):
     # Allow updating both leverage and risk runtime fields via one endpoint
     runtime.set_from_dict(payload)
     data = runtime.to_dict()
-    # Also update the database with the new runtime config if needed
-    # (For now, we just keep it in memory)
+    # Save to database for persistence
+    db = SessionLocal()
+    try:
+        runtime.save_to_db(db)
+    finally:
+        db.close()
     return data
 
 # Add admin alias to fix 403/404 issues with frontend
@@ -598,6 +630,12 @@ async def get_admin_runtime_config():
 @app.post("/api/admin/runtime")
 async def set_admin_runtime_config(payload: dict):
     runtime.set_from_dict(payload)
+    # Save to database for persistence
+    db = SessionLocal()
+    try:
+        runtime.save_to_db(db)
+    finally:
+        db.close()
     return {"success": True, "data": runtime.to_dict()}
 
 

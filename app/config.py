@@ -1,6 +1,7 @@
 from pydantic_settings import BaseSettings
 from pydantic import Field
 from typing import List, Dict, Optional
+from functools import lru_cache
 import json
 
 
@@ -78,5 +79,6 @@ class Settings(BaseSettings):
 		return self.leverage_map().get(symbol, int(self.default_leverage))
 
 
+@lru_cache()
 def get_settings() -> Settings:
 	return Settings()
