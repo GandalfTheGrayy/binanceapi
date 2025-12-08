@@ -65,6 +65,12 @@ class TelegramCommandHandler:
 				if not chat_id:
 					return
 				
+				# GÜVENLİK: Sadece .env'de tanımlı chat_id'den gelen mesajları işle
+				allowed_chat_id = self.notifier.chat_id
+				if chat_id != allowed_chat_id:
+					print(f"[TelegramCommandHandler] Yetkisiz chat_id: {chat_id} (izin verilen: {allowed_chat_id})")
+					return
+				
 				# !islemler komutu kontrolü
 				if text.strip().lower() == "!islemler":
 					await self.show_main_menu(chat_id)
@@ -92,6 +98,13 @@ class TelegramCommandHandler:
 			message_id = message.get("message_id")
 			
 			if not chat_id or not query_id:
+				return
+			
+			# GÜVENLİK: Sadece .env'de tanımlı chat_id'den gelen callback'leri işle
+			allowed_chat_id = self.notifier.chat_id
+			if chat_id != allowed_chat_id:
+				print(f"[TelegramCommandHandler] Yetkisiz callback chat_id: {chat_id}")
+				await self.notifier.answer_callback_query(query_id, "❌ Yetkisiz erişim", show_alert=True)
 				return
 			
 			# Callback'i yanıtla (loading'i kapat)
