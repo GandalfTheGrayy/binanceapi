@@ -78,8 +78,13 @@ class TelegramCommandHandler:
 					print(f"[TelegramCommandHandler] Yetkisiz chat_id: {incoming_chat_id} (izin verilen: {allowed_chat_id})")
 					return
 				
-				# !islemler komutu kontrolü
-				if text.strip().lower() == "!islemler":
+				# /islemler komutu kontrolü (Telegram gruplarında / ile başlayan komutlar gerekli)
+				if text.strip().lower() in ["/islemler", "/islemler@" + self.notifier.bot_token.split(":")[0] if ":" in self.notifier.bot_token else ""]:
+					await self.show_main_menu(chat_id)
+					return
+				
+				# @botismi /islemler formatını da destekle
+				if text.strip().lower().startswith("/islemler"):
 					await self.show_main_menu(chat_id)
 					return
 				
