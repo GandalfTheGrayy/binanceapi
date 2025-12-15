@@ -71,6 +71,7 @@ async def handle_tradingview(
 	# Fill symbol from ticker if missing
 	symbol = payload.symbol or payload.ticker or payload.ticker_upper or payload.tickerid
 	if not symbol:
+		await notifier.close()
 		raise HTTPException(status_code=400, detail="Symbol or ticker required")
 	symbol = normalize_tv_symbol(symbol)
 
@@ -116,6 +117,7 @@ async def handle_tradingview(
 	elif signal in ("SAT", "SELL", "SHORT"):
 		side = "SELL"
 	else:
+		await notifier.close()
 		raise HTTPException(status_code=400, detail="Unsupported signal")
 
 	async with BinanceFuturesClient(
@@ -566,6 +568,9 @@ async def handle_tradingview(
 		await notifier.send_message("\n".join(msg_lines))
 	except Exception:
 		pass
+
+	# Notifier'ı kapat (file descriptor leak önlemi)
+	await notifier.close()
 
 	return {
 		"success": True,

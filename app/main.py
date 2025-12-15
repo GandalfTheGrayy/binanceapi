@@ -126,13 +126,36 @@ async def ws_endpoint(ws: WebSocket):
 
 def heartbeat_job():
     """Her saat çalışan bot durumu mesajı"""
+    notifier = None
     try:
         settings = get_settings()
         notifier = TelegramNotifier(settings.telegram_bot_token, settings.telegram_chat_id)
         timestamp = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
-        notifier.send_message(f"✅ Bot çalışıyor - {timestamp}")
+        
+        # Async mesaj gönder ve kapat
+        async def send_and_close():
+            try:
+                await notifier.send_message(f"✅ Bot çalışıyor - {timestamp}")
+            finally:
+                await notifier.close()
+        
+        try:
+            loop = asyncio.get_event_loop()
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+        
+        if loop.is_running():
+            loop.create_task(send_and_close())
+        else:
+            asyncio.run(send_and_close())
     except Exception:
-        pass
+        # Hata durumunda notifier'ı kapat
+        if notifier:
+            try:
+                asyncio.run(notifier.close())
+            except Exception:
+                pass
 
 
 def hourly_pnl_job():
@@ -325,6 +348,31 @@ def hourly_pnl_job():
     except Exception as e:
         print(f"Hourly job error: {e}")
     finally:
+        # Client'ları kapat (file descriptor leak önlemi)
+        async def cleanup():
+            try:
+                await client.close()
+            except Exception:
+                pass
+            try:
+                await notifier.close()
+            except Exception:
+                pass
+        
+        try:
+            try:
+                loop = asyncio.get_event_loop()
+            except RuntimeError:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+            
+            if loop.is_running():
+                loop.create_task(cleanup())
+            else:
+                asyncio.run(cleanup())
+        except Exception:
+            pass
+        
         db.close()
 
 
@@ -346,26 +394,40 @@ def on_startup():
     if settings.binance_api_key and settings.binance_api_secret and not settings.dry_run:
         client = BinanceFuturesClient(settings.binance_api_key, settings.binance_api_secret, settings.binance_base_url)
         try:
-            pm = client.position_mode()
-            if bool(pm.get("dualSidePosition")):
-                resp = client.set_position_mode(dual=False)
-                # Log to DB
-                db = SessionLocal()
+            # Async işlemleri sync context'te çalıştır
+            async def check_position_mode():
                 try:
-                    _log_binance_call(db, "POST", "/fapi/v1/positionSide/dual", client, response_data=resp)
-                except Exception:
-                    pass
+                    pm = await client.position_mode()
+                    if bool(pm.get("dualSidePosition")):
+                        resp = await client.set_position_mode(dual=False)
+                        # Log to DB
+                        db = SessionLocal()
+                        try:
+                            _log_binance_call(db, "POST", "/fapi/v1/positionSide/dual", client, response_data=resp)
+                        except Exception:
+                            pass
+                        finally:
+                            db.close()
+                except Exception as e:
+                    # Log error but do not prevent startup
+                    db = SessionLocal()
+                    try:
+                        _log_binance_call(db, "POST", "/fapi/v1/positionSide/dual", client, error=str(e))
+                    except Exception:
+                        pass
+                    finally:
+                        db.close()
                 finally:
-                    db.close()
+                    await client.close()
+            
+            asyncio.run(check_position_mode())
         except Exception as e:
-            # Log error but do not prevent startup
-            db = SessionLocal()
+            print(f"[Startup] Position mode check error: {e}")
+            # Client'ı hata durumunda da kapatmayı dene
             try:
-                _log_binance_call(db, "POST", "/fapi/v1/positionSide/dual", client, error=str(e))
+                asyncio.run(client.close())
             except Exception:
                 pass
-            finally:
-                db.close()
     global scheduler
     scheduler = BackgroundScheduler()
     # Her saat bot durumu mesajı
@@ -385,7 +447,14 @@ def on_startup():
     # Bot başlatıldığında hemen test mesajı gönder
     try:
         notifier = TelegramNotifier(settings.telegram_bot_token, settings.telegram_chat_id)
-        notifier.send_message("🚀 Bot başlatıldı ve çalışıyor!")
+        
+        async def send_startup_msg():
+            try:
+                await notifier.send_message("🚀 Bot başlatıldı ve çalışıyor!")
+            finally:
+                await notifier.close()
+        
+        asyncio.run(send_startup_msg())
         # İlk raporu da gönder
         hourly_pnl_job()
     except Exception as e:
@@ -459,12 +528,12 @@ async def dashboard(request: Request):
         orders = db.query(models.OrderRecord).order_by(models.OrderRecord.id.desc()).limit(50).all()
         snap = db.query(models.BalanceSnapshot).order_by(models.BalanceSnapshot.id.desc()).first()
         # Try positions if live
-        try:
-            if settings.binance_api_key and settings.binance_api_secret and not settings.dry_run:
-                client = BinanceFuturesClient(settings.binance_api_key, settings.binance_api_secret, settings.binance_base_url)
-                positions = client.positions()
-        except Exception:
-            positions = []
+        if settings.binance_api_key and settings.binance_api_secret and not settings.dry_run:
+            async with BinanceFuturesClient(settings.binance_api_key, settings.binance_api_secret, settings.binance_base_url) as client:
+                try:
+                    positions = await client.positions()
+                except Exception:
+                    positions = []
         return templates.TemplateResponse(
             "dashboard.html",
             {
@@ -670,29 +739,29 @@ async def test_binance_connectivity():
     if not settings.binance_api_key or not settings.binance_api_secret:
         return {"success": False, "error": "API key veya secret tanımlanmamış"}
     
-    try:
-        client = BinanceFuturesClient(
-            api_key=settings.binance_api_key,
-            api_secret=settings.binance_api_secret,
-            base_url=settings.binance_base_url
-        )
-        result = await client.test_connectivity()
-        # Log
-        db = SessionLocal()
+    async with BinanceFuturesClient(
+        api_key=settings.binance_api_key,
+        api_secret=settings.binance_api_secret,
+        base_url=settings.binance_base_url
+    ) as client:
         try:
-            _log_binance_call(db, "GET", "/fapi/v1/ping", client, response_data=result)
-        finally:
-            db.close()
-        return {"success": True, "data": result, "message": "Bağlantı başarılı"}
-    except Exception as e:
-        # Debug bilgilerini ve log'u ekle
-        db = SessionLocal()
-        try:
-            _log_binance_call(db, "GET", "/fapi/v1/ping", client, error=str(e))
-        finally:
-            db.close()
-        debug_info = client.get_last_request_debug() if hasattr(client, 'get_last_request_debug') else None
-        return {"success": False, "error": str(e), "debug_info": debug_info}
+            result = await client.test_connectivity()
+            # Log
+            db = SessionLocal()
+            try:
+                _log_binance_call(db, "GET", "/fapi/v1/ping", client, response_data=result)
+            finally:
+                db.close()
+            return {"success": True, "data": result, "message": "Bağlantı başarılı"}
+        except Exception as e:
+            # Debug bilgilerini ve log'u ekle
+            db = SessionLocal()
+            try:
+                _log_binance_call(db, "GET", "/fapi/v1/ping", client, error=str(e))
+            finally:
+                db.close()
+            debug_info = client.get_last_request_debug() if hasattr(client, 'get_last_request_debug') else None
+            return {"success": False, "error": str(e), "debug_info": debug_info}
 
 
 @app.get("/api/binance/account")
@@ -702,29 +771,29 @@ async def get_binance_account():
     if not settings.binance_api_key or not settings.binance_api_secret:
         return {"success": False, "error": "API key veya secret tanımlanmamış"}
     
-    try:
-        client = BinanceFuturesClient(
-            api_key=settings.binance_api_key,
-            api_secret=settings.binance_api_secret,
-            base_url=settings.binance_base_url
-        )
-        balances = await client.account_usdt_balances()
-        # Log
-        db = SessionLocal()
+    async with BinanceFuturesClient(
+        api_key=settings.binance_api_key,
+        api_secret=settings.binance_api_secret,
+        base_url=settings.binance_base_url
+    ) as client:
         try:
-            _log_binance_call(db, "GET", "/fapi/v2/balance", client, response_data=balances)
-        finally:
-            db.close()
-        return {"success": True, "data": balances, "message": "Hesap bilgileri alındı"}
-    except Exception as e:
-        # Debug bilgilerini ve log'u ekle
-        db = SessionLocal()
-        try:
-            _log_binance_call(db, "GET", "/fapi/v2/balance", client, error=str(e))
-        finally:
-            db.close()
-        debug_info = client.get_last_request_debug() if hasattr(client, 'get_last_request_debug') else None
-        return {"success": False, "error": str(e), "debug_info": debug_info}
+            balances = await client.account_usdt_balances()
+            # Log
+            db = SessionLocal()
+            try:
+                _log_binance_call(db, "GET", "/fapi/v2/balance", client, response_data=balances)
+            finally:
+                db.close()
+            return {"success": True, "data": balances, "message": "Hesap bilgileri alındı"}
+        except Exception as e:
+            # Debug bilgilerini ve log'u ekle
+            db = SessionLocal()
+            try:
+                _log_binance_call(db, "GET", "/fapi/v2/balance", client, error=str(e))
+            finally:
+                db.close()
+            debug_info = client.get_last_request_debug() if hasattr(client, 'get_last_request_debug') else None
+            return {"success": False, "error": str(e), "debug_info": debug_info}
 
 
 @app.get("/api/binance/positions")
@@ -734,45 +803,45 @@ async def get_binance_positions():
     if not settings.binance_api_key or not settings.binance_api_secret:
         return {"success": False, "error": "API key veya secret tanımlanmamış"}
     
-    try:
-        client = BinanceFuturesClient(
-            api_key=settings.binance_api_key,
-            api_secret=settings.binance_api_secret,
-            base_url=settings.binance_base_url
-        )
-        positions = await client.positions()
-        # Log
-        db = SessionLocal()
+    async with BinanceFuturesClient(
+        api_key=settings.binance_api_key,
+        api_secret=settings.binance_api_secret,
+        base_url=settings.binance_base_url
+    ) as client:
         try:
-            _log_binance_call(db, "GET", "/fapi/v2/positionRisk", client, response_data=positions)
-        finally:
-            db.close()
-        return {"success": True, "data": positions, "message": "Pozisyon bilgileri alındı"}
-    except Exception as e:
-        # Debug bilgilerini ve log'u ekle
-        db = SessionLocal()
-        try:
-            _log_binance_call(db, "GET", "/fapi/v2/positionRisk", client, error=str(e))
-        finally:
-            db.close()
-        debug_info = client.get_last_request_debug() if hasattr(client, 'get_last_request_debug') else None
-        return {"success": False, "error": str(e), "debug_info": debug_info}
+            positions = await client.positions()
+            # Log
+            db = SessionLocal()
+            try:
+                _log_binance_call(db, "GET", "/fapi/v2/positionRisk", client, response_data=positions)
+            finally:
+                db.close()
+            return {"success": True, "data": positions, "message": "Pozisyon bilgileri alındı"}
+        except Exception as e:
+            # Debug bilgilerini ve log'u ekle
+            db = SessionLocal()
+            try:
+                _log_binance_call(db, "GET", "/fapi/v2/positionRisk", client, error=str(e))
+            finally:
+                db.close()
+            debug_info = client.get_last_request_debug() if hasattr(client, 'get_last_request_debug') else None
+            return {"success": False, "error": str(e), "debug_info": debug_info}
 
 
 @app.get("/api/binance/price/{symbol}")
 async def get_binance_price(symbol: str):
     """Get current price for a symbol"""
     settings = get_settings()
-    try:
-        client = BinanceFuturesClient(
-            api_key=settings.binance_api_key,
-            api_secret=settings.binance_api_secret,
-            base_url=settings.binance_base_url
-        )
-        price = await client.ticker_price(symbol.upper())
-        return {"success": True, "symbol": symbol.upper(), "price": price}
-    except Exception as e:
-        return {"success": False, "error": str(e)}
+    async with BinanceFuturesClient(
+        api_key=settings.binance_api_key,
+        api_secret=settings.binance_api_secret,
+        base_url=settings.binance_base_url
+    ) as client:
+        try:
+            price = await client.ticker_price(symbol.upper())
+            return {"success": True, "symbol": symbol.upper(), "price": price}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
 
 # Alias: support query-style access as used by some frontends
 @app.get("/api/binance/price")
@@ -817,111 +886,110 @@ async def create_binance_order(payload: schemas.TradingViewWebhook):
     
     db = SessionLocal()
     try:
-        client = BinanceFuturesClient(
+        async with BinanceFuturesClient(
             api_key=settings.binance_api_key,
             api_secret=settings.binance_api_secret,
             base_url=settings.binance_base_url
-        )
-        
-        # Symbol kontrolü
-        symbol = payload.symbol
-        if not symbol:
-            return {"success": False, "error": "Symbol gerekli"}
-        
-        # Signal kontrolü ve dönüştürme
-        signal = payload.signal.upper()
-        if signal in ("AL", "BUY", "LONG"):
-            side = "BUY"
-        elif signal in ("SAT", "SELL", "SHORT"):
-            side = "SELL"
-        else:
-            return {"success": False, "error": "Desteklenmeyen sinyal"}
-        
-        # Whitelist kontrolü
-        whitelist = settings.get_symbols_whitelist()
-        if symbol.upper() not in whitelist:
-            return {"success": False, "error": "Symbol izin listesinde değil"}
-        
-        # Qty ve price kontrolü
-        if not payload.qty or payload.qty <= 0:
-            return {"success": False, "error": "Geçerli bir miktar (qty) gerekli"}
-        
-        if not payload.price or payload.price <= 0:
-            return {"success": False, "error": "Geçerli bir fiyat gerekli"}
-        
-        # Exchange info ile lot doğrulaması ve qty yuvarlama
-        ex_info = await client.exchange_info()
-        filters = get_symbol_filters(ex_info, symbol)
-        step = float(filters.get("stepSize", 0.0) or 0.0)
-        min_qty = float(filters.get("minQty", 0.0) or 0.0)
-        qty_rounded = round_step(float(payload.qty), step if step > 0 else 0.0001)
-        if qty_rounded < min_qty or qty_rounded <= 0:
-            return {"success": False, "error": f"Miktar minQty altında. minQty={min_qty}, stepSize={step}, gelen={payload.qty}"}
-        
-        # Leverage ayarla
-        leverage = payload.leverage or 1
-        
-        # Hedge modu ise positionSide belirle
-        position_side = None
-        try:
-            pm = await client.position_mode()
-            if bool(pm.get("dualSidePosition")):
-                position_side = "LONG" if side == "BUY" else "SHORT"
-        except Exception:
+        ) as client:
+            # Symbol kontrolü
+            symbol = payload.symbol
+            if not symbol:
+                return {"success": False, "error": "Symbol gerekli"}
+            
+            # Signal kontrolü ve dönüştürme
+            signal = payload.signal.upper()
+            if signal in ("AL", "BUY", "LONG"):
+                side = "BUY"
+            elif signal in ("SAT", "SELL", "SHORT"):
+                side = "SELL"
+            else:
+                return {"success": False, "error": "Desteklenmeyen sinyal"}
+            
+            # Whitelist kontrolü
+            whitelist = settings.get_symbols_whitelist()
+            if symbol.upper() not in whitelist:
+                return {"success": False, "error": "Symbol izin listesinde değil"}
+            
+            # Qty ve price kontrolü
+            if not payload.qty or payload.qty <= 0:
+                return {"success": False, "error": "Geçerli bir miktar (qty) gerekli"}
+            
+            if not payload.price or payload.price <= 0:
+                return {"success": False, "error": "Geçerli bir fiyat gerekli"}
+            
+            # Exchange info ile lot doğrulaması ve qty yuvarlama
+            ex_info = await client.exchange_info()
+            filters = get_symbol_filters(ex_info, symbol)
+            step = float(filters.get("stepSize", 0.0) or 0.0)
+            min_qty = float(filters.get("minQty", 0.0) or 0.0)
+            qty_rounded = round_step(float(payload.qty), step if step > 0 else 0.0001)
+            if qty_rounded < min_qty or qty_rounded <= 0:
+                return {"success": False, "error": f"Miktar minQty altında. minQty={min_qty}, stepSize={step}, gelen={payload.qty}"}
+            
+            # Leverage ayarla
+            leverage = payload.leverage or 1
+            
+            # Hedge modu ise positionSide belirle
             position_side = None
-        
-        if settings.dry_run:
-            # Dry run modu — Binance'e emir gönderme
-            order_response = {
-                "dry_run": True,
-                "symbol": symbol,
-                "side": side,
-                "qty": qty_rounded,
-                "leverage": leverage,
-                "price": payload.price,
-                "position_side": position_side,
-                "note": "Direkt emir (dry run)"
-            }
-        else:
-            # Gerçek emir
             try:
-                # Leverage ayarla
-                resp1 = await client.set_leverage(symbol, leverage)
-                _log_binance_call(db, "POST", "/fapi/v1/leverage", client, response_data=resp1)
-                
-                # Market emri ver (yuvarlanmış qty ile)
-                order_response = await client.place_market_order(symbol, side, qty_rounded, position_side=position_side)
-                _log_binance_call(db, "POST", "/fapi/v1/order", client, response_data=order_response)
-                
-                # orderId yoksa uyarı olarak döndür
-                if order_response.get("orderId") is None:
-                    return {"success": False, "error": "Binance response içinde orderId yok; emir yerleşmemiş olabilir", "response": order_response}
-            except Exception as e:
-                # Hata durumunda log
-                _log_binance_call(db, "POST", "/fapi/v1/order", client, error=str(e))
-                return {"success": False, "error": f"Emir başarısız: {str(e)}"}
-        
-        # Emir kaydını veritabanına kaydet
-        order = models.OrderRecord(
-            symbol=symbol,
-            side=side,
-            position_side=position_side,
-            leverage=leverage,
-            qty=qty_rounded,
-            price=payload.price,
-            status=str(order_response.get("status", "NEW")),
-            binance_order_id=str(order_response.get("orderId")) if order_response.get("orderId") is not None else None,
-            response=order_response,
-        )
-        db.add(order)
-        db.commit()
-        
-        return {
-            "success": True,
-            "message": "Dry-run: emir simüle edildi" if settings.dry_run else "Gerçek emir başarıyla oluşturuldu",
-            "order_id": order.binance_order_id,
-            "response": order_response
-        }
+                pm = await client.position_mode()
+                if bool(pm.get("dualSidePosition")):
+                    position_side = "LONG" if side == "BUY" else "SHORT"
+            except Exception:
+                position_side = None
+            
+            if settings.dry_run:
+                # Dry run modu — Binance'e emir gönderme
+                order_response = {
+                    "dry_run": True,
+                    "symbol": symbol,
+                    "side": side,
+                    "qty": qty_rounded,
+                    "leverage": leverage,
+                    "price": payload.price,
+                    "position_side": position_side,
+                    "note": "Direkt emir (dry run)"
+                }
+            else:
+                # Gerçek emir
+                try:
+                    # Leverage ayarla
+                    resp1 = await client.set_leverage(symbol, leverage)
+                    _log_binance_call(db, "POST", "/fapi/v1/leverage", client, response_data=resp1)
+                    
+                    # Market emri ver (yuvarlanmış qty ile)
+                    order_response = await client.place_market_order(symbol, side, qty_rounded, position_side=position_side)
+                    _log_binance_call(db, "POST", "/fapi/v1/order", client, response_data=order_response)
+                    
+                    # orderId yoksa uyarı olarak döndür
+                    if order_response.get("orderId") is None:
+                        return {"success": False, "error": "Binance response içinde orderId yok; emir yerleşmemiş olabilir", "response": order_response}
+                except Exception as e:
+                    # Hata durumunda log
+                    _log_binance_call(db, "POST", "/fapi/v1/order", client, error=str(e))
+                    return {"success": False, "error": f"Emir başarısız: {str(e)}"}
+            
+            # Emir kaydını veritabanına kaydet
+            order = models.OrderRecord(
+                symbol=symbol,
+                side=side,
+                position_side=position_side,
+                leverage=leverage,
+                qty=qty_rounded,
+                price=payload.price,
+                status=str(order_response.get("status", "NEW")),
+                binance_order_id=str(order_response.get("orderId")) if order_response.get("orderId") is not None else None,
+                response=order_response,
+            )
+            db.add(order)
+            db.commit()
+            
+            return {
+                "success": True,
+                "message": "Dry-run: emir simüle edildi" if settings.dry_run else "Gerçek emir başarıyla oluşturuldu",
+                "order_id": order.binance_order_id,
+                "response": order_response
+            }
         
     except Exception as e:
         return {"success": False, "error": str(e)}
@@ -952,10 +1020,10 @@ async def test_telegram():
             "chat_id_value": settings.telegram_chat_id
         }
     
+    notifier = TelegramNotifier(settings.telegram_bot_token, settings.telegram_chat_id)
     try:
-        notifier = TelegramNotifier(settings.telegram_bot_token, settings.telegram_chat_id)
         timestamp = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
-        result = notifier.send_message(f"🧪 Test Mesajı - {timestamp}")
+        result = await notifier.send_message(f"🧪 Test Mesajı - {timestamp}")
         
         if result:
             return {
@@ -979,6 +1047,8 @@ async def test_telegram():
             "bot_token_preview": settings.telegram_bot_token[:20] + "..." if len(settings.telegram_bot_token) > 20 else settings.telegram_bot_token,
             "chat_id": settings.telegram_chat_id
         }
+    finally:
+        await notifier.close()
 
 
 @app.get("/api/telegram/test")

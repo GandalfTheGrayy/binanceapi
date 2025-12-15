@@ -9,6 +9,20 @@ class TelegramNotifier:
 		self.base_url = f"https://api.telegram.org/bot{self.bot_token}"
 		self.last_error = None
 		self.last_update_id = 0
+		# Tek bir client instance - yeniden kullanılacak (file descriptor leak önlemi)
+		self._client: Optional[httpx.AsyncClient] = None
+	
+	async def _get_client(self) -> httpx.AsyncClient:
+		"""Lazy initialization ile client döndür."""
+		if self._client is None or self._client.is_closed:
+			self._client = httpx.AsyncClient(timeout=30.0)
+		return self._client
+	
+	async def close(self):
+		"""HTTP client'ı kapat."""
+		if self._client is not None and not self._client.is_closed:
+			await self._client.aclose()
+			self._client = None
 
 	async def get_updates(self, offset: int = None, timeout: int = 1) -> List[Dict[str, Any]]:
 		"""
@@ -24,21 +38,22 @@ class TelegramNotifier:
 			elif self.last_update_id > 0:
 				params["offset"] = self.last_update_id + 1
 			
-			async with httpx.AsyncClient(timeout=timeout + 5) as client:
-				resp = await client.get(
-					f"{self.base_url}/getUpdates",
-					params=params
-				)
-				resp.raise_for_status()
-				result = resp.json()
-				
-				if result.get("ok") and result.get("result"):
-					updates = result["result"]
-					# Update last_update_id
-					if updates:
-						self.last_update_id = max(u.get("update_id", 0) for u in updates)
-					return updates
-				return []
+			client = await self._get_client()
+			resp = await client.get(
+				f"{self.base_url}/getUpdates",
+				params=params,
+				timeout=timeout + 5
+			)
+			resp.raise_for_status()
+			result = resp.json()
+			
+			if result.get("ok") and result.get("result"):
+				updates = result["result"]
+				# Update last_update_id
+				if updates:
+					self.last_update_id = max(u.get("update_id", 0) for u in updates)
+				return updates
+			return []
 		except Exception as e:
 			print(f"[Telegram] getUpdates hatası: {e}")
 			return []
@@ -63,20 +78,21 @@ class TelegramNotifier:
 				"inline_keyboard": keyboard
 			}
 			
-			async with httpx.AsyncClient(timeout=15.0) as client:
-				resp = await client.post(
-					f"{self.base_url}/sendMessage",
-					json={
-						"chat_id": target_chat,
-						"text": text,
-						"parse_mode": "HTML",
-						"reply_markup": reply_markup
-					}
-				)
-				resp.raise_for_status()
-				result = resp.json()
-				self.last_error = None
-				return result
+			client = await self._get_client()
+			resp = await client.post(
+				f"{self.base_url}/sendMessage",
+				json={
+					"chat_id": target_chat,
+					"text": text,
+					"parse_mode": "HTML",
+					"reply_markup": reply_markup
+				},
+				timeout=15.0
+			)
+			resp.raise_for_status()
+			result = resp.json()
+			self.last_error = None
+			return result
 		except httpx.HTTPStatusError as e:
 			self.last_error = f"HTTP Hatası {e.response.status_code}: {e.response.text}"
 			print(f"[Telegram] Hata: {self.last_error}")
@@ -104,13 +120,14 @@ class TelegramNotifier:
 				data["text"] = text
 			data["show_alert"] = show_alert
 			
-			async with httpx.AsyncClient(timeout=10.0) as client:
-				resp = await client.post(
-					f"{self.base_url}/answerCallbackQuery",
-					json=data
-				)
-				resp.raise_for_status()
-				return True
+			client = await self._get_client()
+			resp = await client.post(
+				f"{self.base_url}/answerCallbackQuery",
+				json=data,
+				timeout=10.0
+			)
+			resp.raise_for_status()
+			return True
 		except Exception as e:
 			print(f"[Telegram] answerCallbackQuery hatası: {e}")
 			return False
@@ -139,13 +156,14 @@ class TelegramNotifier:
 			if keyboard:
 				data["reply_markup"] = {"inline_keyboard": keyboard}
 			
-			async with httpx.AsyncClient(timeout=10.0) as client:
-				resp = await client.post(
-					f"{self.base_url}/editMessageText",
-					json=data
-				)
-				resp.raise_for_status()
-				return resp.json()
+			client = await self._get_client()
+			resp = await client.post(
+				f"{self.base_url}/editMessageText",
+				json=data,
+				timeout=10.0
+			)
+			resp.raise_for_status()
+			return resp.json()
 		except Exception as e:
 			print(f"[Telegram] editMessageText hatası: {e}")
 			return None
@@ -158,16 +176,17 @@ class TelegramNotifier:
 		try:
 			print(f"[Telegram] Mesaj gönderiliyor: {text[:50]}...")
 			print(f"[Telegram] Chat ID: {self.chat_id}")
-			async with httpx.AsyncClient(timeout=15.0) as client:
-				resp = await client.post(
-					f"{self.base_url}/sendMessage",
-					json={"chat_id": self.chat_id, "text": text, "parse_mode": "HTML"},
-				)
-				resp.raise_for_status()
-				result = resp.json()
-				print(f"[Telegram] Mesaj başarıyla gönderildi!")
-				self.last_error = None
-				return result
+			client = await self._get_client()
+			resp = await client.post(
+				f"{self.base_url}/sendMessage",
+				json={"chat_id": self.chat_id, "text": text, "parse_mode": "HTML"},
+				timeout=15.0
+			)
+			resp.raise_for_status()
+			result = resp.json()
+			print(f"[Telegram] Mesaj başarıyla gönderildi!")
+			self.last_error = None
+			return result
 		except httpx.HTTPStatusError as e:
 			self.last_error = f"HTTP Hatası {e.response.status_code}: {e.response.text}"
 			print(f"[Telegram] Hata: {self.last_error}")
@@ -188,22 +207,23 @@ class TelegramNotifier:
 		
 		try:
 			print(f"[Telegram] Fotoğraf gönderiliyor...")
-			async with httpx.AsyncClient(timeout=30.0) as client:
-				files = {'photo': ('chart.png', photo_file, 'image/png')}
-				data = {'chat_id': self.chat_id}
-				if caption:
-					data['caption'] = caption
-					data['parse_mode'] = 'HTML'
-				
-				resp = await client.post(
-					f"{self.base_url}/sendPhoto",
-					data=data,
-					files=files
-				)
-				resp.raise_for_status()
-				result = resp.json()
-				print(f"[Telegram] Fotoğraf başarıyla gönderildi!")
-				return result
+			client = await self._get_client()
+			files = {'photo': ('chart.png', photo_file, 'image/png')}
+			data = {'chat_id': self.chat_id}
+			if caption:
+				data['caption'] = caption
+				data['parse_mode'] = 'HTML'
+			
+			resp = await client.post(
+				f"{self.base_url}/sendPhoto",
+				data=data,
+				files=files,
+				timeout=30.0
+			)
+			resp.raise_for_status()
+			result = resp.json()
+			print(f"[Telegram] Fotoğraf başarıyla gönderildi!")
+			return result
 		except httpx.HTTPStatusError as e:
 			self.last_error = f"HTTP Hatası {e.response.status_code}: {e.response.text}"
 			print(f"[Telegram] Hata: {self.last_error}")

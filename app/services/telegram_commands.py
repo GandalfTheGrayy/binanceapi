@@ -269,6 +269,7 @@ class TelegramCommandHandler:
 	async def send_report(self, chat_id: str):
 		"""Saatlik raporu gönderir (hourly_pnl_job ile aynı mantık)."""
 		db = SessionLocal()
+		client = None
 		try:
 			settings = get_settings()
 			client = BinanceFuturesClient(
@@ -394,6 +395,9 @@ class TelegramCommandHandler:
 			print(f"[TelegramCommandHandler] Rapor gönderme hatası: {e}")
 			await self.notifier.send_message(f"❌ Rapor oluşturulurken hata oluştu: {e}")
 		finally:
+			# BinanceFuturesClient'ı kapat (file descriptor leak önlemi)
+			if client is not None:
+				await client.close()
 			db.close()
 
 
@@ -456,7 +460,7 @@ async def start_polling_loop():
 
 async def stop_polling_loop():
 	"""Background polling task'ını durdurur."""
-	global _polling_task, _polling_running
+	global _polling_task, _polling_running, command_handler
 	
 	_polling_running = False
 	
@@ -467,6 +471,10 @@ async def stop_polling_loop():
 		except asyncio.CancelledError:
 			pass
 		_polling_task = None
+	
+	# Notifier'ın HTTP client'ını kapat (file descriptor leak önlemi)
+	if command_handler is not None and command_handler.notifier is not None:
+		await command_handler.notifier.close()
 	
 	print("[TelegramCommandHandler] Polling task durduruldu")
 
