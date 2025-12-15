@@ -177,6 +177,7 @@ async def handle_tradingview(
 			_log_binance_call(db, "GET", "/fapi/v1/exchangeInfo", client, response_data=ex_info)
 		except Exception as e:
 			_log_binance_call(db, "GET", "/fapi/v1/exchangeInfo", client, error=str(e))
+			await notifier.close()
 			raise HTTPException(status_code=400, detail=f"exchangeInfo hatası: {e}")
 
 		# Position mode (hedge vs one-way)
@@ -198,6 +199,7 @@ async def handle_tradingview(
 				force_msg = "Pozisyon modu One-way olarak ayarlandı."
 			except Exception as e:
 				_log_binance_call(db, "POST", "/fapi/v1/positionSide/dual", client, error=str(e))
+				await notifier.close()
 				raise HTTPException(status_code=400, detail=f"Pozisyon modu One-way'a çekilemedi: {e}")
 
 		# Get current available balance from Binance (işlem öncesi)
@@ -211,6 +213,7 @@ async def handle_tradingview(
 				balance_before = available_balance  # İşlem öncesi bakiye
 			except Exception as e:
 				_log_binance_call(db, "GET", "/fapi/v2/balance", client, error=str(e))
+				await notifier.close()
 				raise HTTPException(status_code=400, detail=f"Balance alınamadı: {e}")
 
 		# Kaldıraç seçimi: Her zaman runtime'daki varsayılan (default) kaldıracı kullan
@@ -223,6 +226,7 @@ async def handle_tradingview(
 				raise ValueError("Geçersiz fiyat")
 		except Exception as e:
 			_log_binance_call(db, "GET", "/fapi/v1/ticker/price", client, error=str(e))
+			await notifier.close()
 			raise HTTPException(status_code=400, detail=f"Fiyat bilgisi alınamadı: {e}")
 
 		# Quantity hesaplama: Available balance'ın %10'u veya fixed tutar
@@ -258,6 +262,7 @@ async def handle_tradingview(
 		order_qty = float(formatted_qty)
 		
 		if order_qty <= 0 or order_qty < filters["minQty"]:
+			await notifier.close()
 			raise HTTPException(status_code=400, detail="Hesaplanan quantity minimum lot size'dan küçük")
 
 		# Pozisyon kontrolü: Ters yönde pozisyon varsa önce onu kapat
@@ -351,6 +356,7 @@ async def handle_tradingview(
 
 		# Eğer braket nedeniyle yeni pozisyon açılamıyorsa (ve kapanış da yoksa), kullanıcıyı bilgilendir
 		if (not settings.dry_run) and order_qty <= 0:
+			await notifier.close()
 			raise HTTPException(status_code=400, detail="Mevcut kaldıraç seviyesinde izin verilen maksimum pozisyon sınırı nedeniyle yeni pozisyon açılamıyor (maxNotional). İşlem miktarı 0'a düşürüldü.")
 
 		order_response: Dict[str, Any]
@@ -412,6 +418,7 @@ async def handle_tradingview(
 				except:
 					pass
 
+				await notifier.close()
 				raise HTTPException(status_code=400, detail=err_msg)
 			
 			# Isolated margin ayarla
@@ -476,6 +483,7 @@ async def handle_tradingview(
 				except:
 					pass
 					
+				await notifier.close()
 				raise HTTPException(status_code=400, detail=err_msg)
 
 		# Save order record

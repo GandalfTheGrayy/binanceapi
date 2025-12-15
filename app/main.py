@@ -125,255 +125,179 @@ async def ws_endpoint(ws: WebSocket):
 
 
 def heartbeat_job():
-    """Her saat çalışan bot durumu mesajı"""
-    notifier = None
-    try:
+    """Her saat çalışan bot durumu mesajı (scheduler thread'inde çalışır)"""
+    async def _send():
         settings = get_settings()
         notifier = TelegramNotifier(settings.telegram_bot_token, settings.telegram_chat_id)
-        timestamp = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
-        
-        # Async mesaj gönder ve kapat
-        async def send_and_close():
-            try:
-                await notifier.send_message(f"✅ Bot çalışıyor - {timestamp}")
-            finally:
-                await notifier.close()
-        
         try:
-            loop = asyncio.get_event_loop()
-        except RuntimeError:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-        
-        if loop.is_running():
-            loop.create_task(send_and_close())
-        else:
-            asyncio.run(send_and_close())
-    except Exception:
-        # Hata durumunda notifier'ı kapat
-        if notifier:
-            try:
-                asyncio.run(notifier.close())
-            except Exception:
-                pass
+            timestamp = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+            await notifier.send_message(f"✅ Bot çalışıyor - {timestamp}")
+        except Exception as e:
+            print(f"[Heartbeat] Mesaj gönderilemedi: {e}")
+        finally:
+            await notifier.close()
+    
+    try:
+        asyncio.run(_send())
+    except Exception as e:
+        print(f"[Heartbeat] Job error: {e}")
 
 
 def hourly_pnl_job():
-    db = SessionLocal()
-    try:
-        settings = get_settings()
-        client = BinanceFuturesClient(settings.binance_api_key, settings.binance_api_secret, settings.binance_base_url)
-        notifier = TelegramNotifier(settings.telegram_bot_token, settings.telegram_chat_id)
-
-        # Asenkron verileri çekmek için yardımcı fonksiyon
-        async def fetch_data():
-            try:
-                balances_task = client.account_usdt_balances()
-                positions_task = client.positions()
-                return await asyncio.gather(balances_task, positions_task)
-            except Exception as e:
-                print(f"Data fetch error: {e}")
-                return {}, []
-
-        # Try to fetch real balances and positions
-        wallet = 0.0
-        available = 0.0
-        positions = []
+    """Saatlik PnL raporu (scheduler thread'inde çalışır)"""
+    
+    async def _run_job():
+        db = SessionLocal()
+        client = None
+        notifier = None
         
-        if settings.binance_api_key and settings.binance_api_secret and not settings.dry_run:
-            try:
-                # Run async tasks in sync context
+        try:
+            settings = get_settings()
+            notifier = TelegramNotifier(settings.telegram_bot_token, settings.telegram_chat_id)
+
+            # Try to fetch real balances and positions
+            wallet = 0.0
+            available = 0.0
+            positions = []
+            
+            if settings.binance_api_key and settings.binance_api_secret and not settings.dry_run:
                 try:
-                    loop = asyncio.get_event_loop()
-                except RuntimeError:
-                    loop = asyncio.new_event_loop()
-                    asyncio.set_event_loop(loop)
-                
-                if loop.is_running():
-                    import concurrent.futures
-                    with concurrent.futures.ThreadPoolExecutor() as executor:
-                         future = executor.submit(asyncio.run, fetch_data())
-                         acct, positions = future.result()
-                else:
-                     acct, positions = asyncio.run(fetch_data())
-
-                wallet = acct.get("wallet", 0.0)
-                available = acct.get("available", 0.0)
-            except Exception as e:
-                print(f"Async execution error: {e}")
-                pass
-
-        # 1. Get previous data for PnL calcs
-        last_snap = db.query(models.BalanceSnapshot).order_by(models.BalanceSnapshot.id.desc()).first()
-        used = last_snap.used_allocation_usd if last_snap else 0.0
-        if wallet == 0.0:
-            wallet = last_snap.total_wallet_balance if last_snap else 100000.0
-        if available == 0.0:
-            available = wallet - used
-
-        # Simple PnL estimate: change of wallet vs first snapshot in DB
-        first_snap = db.query(models.BalanceSnapshot).order_by(models.BalanceSnapshot.id.asc()).first()
-        pnl_total = (wallet - first_snap.total_wallet_balance) if first_snap else 0.0
-        # Hourly pnl approx: diff vs last snapshot (last_snap is the previous one here)
-        pnl_1h = (wallet - last_snap.total_wallet_balance) if last_snap else 0.0
-
-        msg = (
-            f"Saatlik Rapor\n"
-            f"Wallet: {wallet:.2f} USDT\n"
-            f"Available: {available:.2f} USDT\n"
-            f"Used: {used:.2f} USDT\n"
-            f"PNL 1h: {pnl_1h:.2f} USDT\n"
-            f"PNL Total: {pnl_total:.2f} USDT\n"
-        )
-
-        # Açık pozisyonları ekle
-        total_unrealized_pnl = 0.0
-        total_position_cost = 0.0
-
-        if positions:
-            msg += "\n📊 Açık Pozisyonlar:\n"
-            for pos in positions:
-                try:
-                    symbol = pos.get("symbol")
-                    amt = float(pos.get("positionAmt", 0.0))
-                    entry_price = float(pos.get("entryPrice", 0.0))
-                    mark_price = float(pos.get("markPrice", 0.0))
-                    unrealized_pnl = float(pos.get("unRealizedProfit", 0.0))
-                    leverage = float(pos.get("leverage", 1.0))
-                    
-                    if amt == 0:
-                        continue
-
-                    side = "LONG" if amt > 0 else "SHORT"
-                    
-                    initial_margin = (entry_price * abs(amt)) / leverage if leverage > 0 else 0
-                    roe_pct = 0.0
-                    if initial_margin > 0:
-                        roe_pct = (unrealized_pnl / initial_margin) * 100
-                    
-                    cost = initial_margin
-                    
-                    # Toplamları güncelle
-                    total_unrealized_pnl += unrealized_pnl
-                    total_position_cost += cost
-
-                    msg += (
-                        f"{symbol} ({side})\n"
-                        f"Giriş: {entry_price} | Mark: {mark_price}\n"
-                        f"Miktar: {amt} | Maliyet: ${cost:.2f}\n"
-                        f"Kâr: ${unrealized_pnl:.2f} (%{roe_pct:.2f})\n"
-                        f"----------------\n"
-                    )
+                    async with BinanceFuturesClient(settings.binance_api_key, settings.binance_api_secret, settings.binance_base_url) as client:
+                        acct = await client.account_usdt_balances()
+                        positions = await client.positions()
+                        wallet = acct.get("wallet", 0.0)
+                        available = acct.get("available", 0.0)
                 except Exception as e:
-                    print(f"Error processing position {pos.get('symbol')}: {e}")
-                    continue
-            
-            estimated_balance = wallet + total_unrealized_pnl
-            msg += f"\n💰 Tahmini Toplam Bakiye: {estimated_balance:.2f} USDT\n(Pozisyonlar şu an kapanırsa)"
-        else:
-            # No open positions
-            estimated_balance = wallet
+                    print(f"[HourlyPnL] Binance veri çekme hatası: {e}")
 
-        # 2. Save Snapshot with Equity info
-        db.add(models.BalanceSnapshot(
-            total_wallet_balance=wallet,
-            available_balance=available,
-            used_allocation_usd=used,
-            total_equity=estimated_balance,
-            unrealized_pnl=total_unrealized_pnl,
-            note=f"Hourly snapshot {datetime.utcnow().isoformat()}Z",
-        ))
-        db.commit()
+            # 1. Get previous data for PnL calcs
+            last_snap = db.query(models.BalanceSnapshot).order_by(models.BalanceSnapshot.id.desc()).first()
+            used = last_snap.used_allocation_usd if last_snap else 0.0
+            if wallet == 0.0:
+                wallet = last_snap.total_wallet_balance if last_snap else 100000.0
+            if available == 0.0:
+                available = wallet - used
 
-        # 3. Generate Graph
-        graph_bio = None
-        try:
-            # Fetch last 24h data (or more)
-            last_snaps = db.query(models.BalanceSnapshot).order_by(models.BalanceSnapshot.id.desc()).limit(48).all()
-            last_snaps.reverse() # Oldest first
-            
-            if last_snaps and len(last_snaps) > 1:
-                # Extract data
-                # Create readable labels (just hour)
-                dates = [s.created_at.strftime("%H:%M") for s in last_snaps]
-                equities = [s.total_equity if s.total_equity is not None else s.total_wallet_balance for s in last_snaps]
-                
-                plt.figure(figsize=(10, 5))
-                plt.plot(dates, equities, marker='o', linestyle='-', color='b', markersize=4)
-                
-                plt.title('Toplam Bakiye (Equity) - Son 48 Saat')
-                plt.xlabel('Saat')
-                plt.ylabel('USDT')
-                plt.grid(True, which='both', linestyle='--', linewidth=0.5)
-                
-                # X ekseninde çok fazla etiket olmasın diye filtreleme
-                n = len(dates)
-                if n > 12:
-                    step = n // 12
-                    plt.xticks(range(0, n, step), dates[::step], rotation=45)
-                else:
-                    plt.xticks(rotation=45)
+            # Simple PnL estimate: change of wallet vs first snapshot in DB
+            first_snap = db.query(models.BalanceSnapshot).order_by(models.BalanceSnapshot.id.asc()).first()
+            pnl_total = (wallet - first_snap.total_wallet_balance) if first_snap else 0.0
+            pnl_1h = (wallet - last_snap.total_wallet_balance) if last_snap else 0.0
 
-                plt.tight_layout()
-                
-                graph_bio = io.BytesIO()
-                plt.savefig(graph_bio, format='png')
-                graph_bio.seek(0)
-                plt.close()
-        except Exception as e:
-            print(f"Graph generation error: {e}")
+            msg = (
+                f"Saatlik Rapor\n"
+                f"Wallet: {wallet:.2f} USDT\n"
+                f"Available: {available:.2f} USDT\n"
+                f"Used: {used:.2f} USDT\n"
+                f"PNL 1h: {pnl_1h:.2f} USDT\n"
+                f"PNL Total: {pnl_total:.2f} USDT\n"
+            )
 
-        # 4. Send Telegram Message
-        try:
-            # Create async runner helper
-            async def send():
+            # Açık pozisyonları ekle
+            total_unrealized_pnl = 0.0
+            total_position_cost = 0.0
+
+            if positions:
+                msg += "\n📊 Açık Pozisyonlar:\n"
+                for pos in positions:
+                    try:
+                        symbol = pos.get("symbol")
+                        amt = float(pos.get("positionAmt", 0.0))
+                        entry_price = float(pos.get("entryPrice", 0.0))
+                        mark_price = float(pos.get("markPrice", 0.0))
+                        unrealized_pnl = float(pos.get("unRealizedProfit", 0.0))
+                        leverage = float(pos.get("leverage", 1.0))
+                        
+                        if amt == 0:
+                            continue
+
+                        side = "LONG" if amt > 0 else "SHORT"
+                        initial_margin = (entry_price * abs(amt)) / leverage if leverage > 0 else 0
+                        roe_pct = (unrealized_pnl / initial_margin) * 100 if initial_margin > 0 else 0.0
+                        cost = initial_margin
+                        
+                        total_unrealized_pnl += unrealized_pnl
+                        total_position_cost += cost
+
+                        msg += (
+                            f"{symbol} ({side})\n"
+                            f"Giriş: {entry_price} | Mark: {mark_price}\n"
+                            f"Miktar: {amt} | Maliyet: ${cost:.2f}\n"
+                            f"Kâr: ${unrealized_pnl:.2f} (%{roe_pct:.2f})\n"
+                            f"----------------\n"
+                        )
+                    except Exception as e:
+                        print(f"[HourlyPnL] Position işleme hatası: {e}")
+                        continue
+                
+                estimated_balance = wallet + total_unrealized_pnl
+                msg += f"\n💰 Tahmini Toplam Bakiye: {estimated_balance:.2f} USDT\n(Pozisyonlar şu an kapanırsa)"
+            else:
+                estimated_balance = wallet
+
+            # 2. Save Snapshot with Equity info
+            db.add(models.BalanceSnapshot(
+                total_wallet_balance=wallet,
+                available_balance=available,
+                used_allocation_usd=used,
+                total_equity=estimated_balance,
+                unrealized_pnl=total_unrealized_pnl,
+                note=f"Hourly snapshot {datetime.utcnow().isoformat()}Z",
+            ))
+            db.commit()
+
+            # 3. Generate Graph
+            graph_bio = None
+            try:
+                last_snaps = db.query(models.BalanceSnapshot).order_by(models.BalanceSnapshot.id.desc()).limit(48).all()
+                last_snaps.reverse()
+                
+                if last_snaps and len(last_snaps) > 1:
+                    dates = [s.created_at.strftime("%H:%M") for s in last_snaps]
+                    equities = [s.total_equity if s.total_equity is not None else s.total_wallet_balance for s in last_snaps]
+                    
+                    plt.figure(figsize=(10, 5))
+                    plt.plot(dates, equities, marker='o', linestyle='-', color='b', markersize=4)
+                    plt.title('Toplam Bakiye (Equity) - Son 48 Saat')
+                    plt.xlabel('Saat')
+                    plt.ylabel('USDT')
+                    plt.grid(True, which='both', linestyle='--', linewidth=0.5)
+                    
+                    n = len(dates)
+                    if n > 12:
+                        step = n // 12
+                        plt.xticks(range(0, n, step), dates[::step], rotation=45)
+                    else:
+                        plt.xticks(rotation=45)
+
+                    plt.tight_layout()
+                    
+                    graph_bio = io.BytesIO()
+                    plt.savefig(graph_bio, format='png')
+                    graph_bio.seek(0)
+                    plt.close()
+            except Exception as e:
+                print(f"[HourlyPnL] Grafik oluşturma hatası: {e}")
+
+            # 4. Send Telegram Message
+            try:
                 if graph_bio:
                     await notifier.send_photo(graph_bio, caption=msg)
                 else:
                     await notifier.send_message(msg)
+            except Exception as e:
+                print(f"[HourlyPnL] Telegram gönderme hatası: {e}")
 
-            try:
-                loop = asyncio.get_event_loop()
-            except RuntimeError:
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-
-            if loop.is_running():
-                loop.create_task(send())
-            else:
-                asyncio.run(send())
         except Exception as e:
-            print(f"Telegram send error: {e}")
-
-    except Exception as e:
-        print(f"Hourly job error: {e}")
-    finally:
-        # Client'ları kapat (file descriptor leak önlemi)
-        async def cleanup():
-            try:
-                await client.close()
-            except Exception:
-                pass
-            try:
+            print(f"[HourlyPnL] Job error: {e}")
+        finally:
+            if notifier:
                 await notifier.close()
-            except Exception:
-                pass
-        
-        try:
-            try:
-                loop = asyncio.get_event_loop()
-            except RuntimeError:
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-            
-            if loop.is_running():
-                loop.create_task(cleanup())
-            else:
-                asyncio.run(cleanup())
-        except Exception:
-            pass
-        
-        db.close()
+            db.close()
+    
+    try:
+        asyncio.run(_run_job())
+    except Exception as e:
+        print(f"[HourlyPnL] asyncio.run error: {e}")
 
 
 @app.on_event("startup")
@@ -390,44 +314,7 @@ def on_startup():
     finally:
         db.close()
     app.state.public_base_url = settings.public_base_url or ""
-    # Ensure One-way mode on startup when live
-    if settings.binance_api_key and settings.binance_api_secret and not settings.dry_run:
-        client = BinanceFuturesClient(settings.binance_api_key, settings.binance_api_secret, settings.binance_base_url)
-        try:
-            # Async işlemleri sync context'te çalıştır
-            async def check_position_mode():
-                try:
-                    pm = await client.position_mode()
-                    if bool(pm.get("dualSidePosition")):
-                        resp = await client.set_position_mode(dual=False)
-                        # Log to DB
-                        db = SessionLocal()
-                        try:
-                            _log_binance_call(db, "POST", "/fapi/v1/positionSide/dual", client, response_data=resp)
-                        except Exception:
-                            pass
-                        finally:
-                            db.close()
-                except Exception as e:
-                    # Log error but do not prevent startup
-                    db = SessionLocal()
-                    try:
-                        _log_binance_call(db, "POST", "/fapi/v1/positionSide/dual", client, error=str(e))
-                    except Exception:
-                        pass
-                    finally:
-                        db.close()
-                finally:
-                    await client.close()
-            
-            asyncio.run(check_position_mode())
-        except Exception as e:
-            print(f"[Startup] Position mode check error: {e}")
-            # Client'ı hata durumunda da kapatmayı dene
-            try:
-                asyncio.run(client.close())
-            except Exception:
-                pass
+    
     global scheduler
     scheduler = BackgroundScheduler()
     # Her saat bot durumu mesajı
@@ -443,22 +330,6 @@ def on_startup():
         print("[Startup] Telegram komut handler'ı başlatıldı (polling lifespan'da başlayacak)")
     
     scheduler.start()
-    
-    # Bot başlatıldığında hemen test mesajı gönder
-    try:
-        notifier = TelegramNotifier(settings.telegram_bot_token, settings.telegram_chat_id)
-        
-        async def send_startup_msg():
-            try:
-                await notifier.send_message("🚀 Bot başlatıldı ve çalışıyor!")
-            finally:
-                await notifier.close()
-        
-        asyncio.run(send_startup_msg())
-        # İlk raporu da gönder
-        hourly_pnl_job()
-    except Exception as e:
-        print(f"[Startup] Telegram test mesajı gönderilemedi: {e}")
 
     # Debug: print registered routes and openapi paths on startup
     try:
@@ -483,11 +354,53 @@ async def on_shutdown():
         scheduler.shutdown(wait=False)
 
 
-# Telegram polling'i başlat (async event loop hazır olduğunda)
+# Async startup işlemleri (event loop hazır olduğunda)
 @app.on_event("startup")
 async def on_startup_async():
     settings = get_settings()
+    
+    # Ensure One-way mode on startup when live
+    if settings.binance_api_key and settings.binance_api_secret and not settings.dry_run:
+        try:
+            async with BinanceFuturesClient(settings.binance_api_key, settings.binance_api_secret, settings.binance_base_url) as client:
+                try:
+                    pm = await client.position_mode()
+                    if bool(pm.get("dualSidePosition")):
+                        resp = await client.set_position_mode(dual=False)
+                        # Log to DB
+                        db = SessionLocal()
+                        try:
+                            _log_binance_call(db, "POST", "/fapi/v1/positionSide/dual", client, response_data=resp)
+                        except Exception:
+                            pass
+                        finally:
+                            db.close()
+                        print("[Startup] Position mode One-way olarak ayarlandı")
+                except Exception as e:
+                    # Log error but do not prevent startup
+                    db = SessionLocal()
+                    try:
+                        _log_binance_call(db, "POST", "/fapi/v1/positionSide/dual", client, error=str(e))
+                    except Exception:
+                        pass
+                    finally:
+                        db.close()
+                    print(f"[Startup] Position mode check error: {e}")
+        except Exception as e:
+            print(f"[Startup] Binance client error: {e}")
+    
+    # Bot başlatıldığında hemen test mesajı gönder
     if settings.telegram_bot_token and settings.telegram_chat_id:
+        notifier = TelegramNotifier(settings.telegram_bot_token, settings.telegram_chat_id)
+        try:
+            await notifier.send_message("🚀 Bot başlatıldı ve çalışıyor!")
+            print("[Startup] Telegram başlangıç mesajı gönderildi")
+        except Exception as e:
+            print(f"[Startup] Telegram test mesajı gönderilemedi: {e}")
+        finally:
+            await notifier.close()
+        
+        # Telegram polling'i başlat
         await start_polling_loop()
         print("[Startup] Telegram polling loop başlatıldı")
 
