@@ -3,7 +3,7 @@ Telegram Command Handler - !islemler komutu için interaktif menü yönetimi
 """
 import asyncio
 from typing import Dict, Any, Optional
-from datetime import datetime
+from datetime import datetime, timedelta
 import io
 import matplotlib
 matplotlib.use('Agg')
@@ -355,16 +355,61 @@ class TelegramCommandHandler:
 			# Grafik oluştur
 			graph_bio = None
 			try:
-				last_snaps = db.query(models.BalanceSnapshot).order_by(models.BalanceSnapshot.id.desc()).limit(48).all()
-				last_snaps.reverse()
+				# Zaman bazlı veri çekme: Son 24 saat için her saat için en yakın snapshot'ı al
+				end_time = datetime.utcnow()
+				snapshots = []
 				
-				if last_snaps and len(last_snaps) > 1:
-					dates = [s.created_at.strftime("%H:%M") for s in last_snaps]
-					equities = [s.total_equity if s.total_equity is not None else s.total_wallet_balance for s in last_snaps]
+				for hour_offset in range(24):
+					target_time = end_time - timedelta(hours=hour_offset)
+					# Her saat için en yakın snapshot'ı bul (30 dakika tolerans)
+					snap = db.query(models.BalanceSnapshot).filter(
+						models.BalanceSnapshot.created_at <= target_time
+					).order_by(models.BalanceSnapshot.created_at.desc()).first()
+					
+					if snap:
+						# Aynı snapshot'ı tekrar eklememek için kontrol et
+						if not snapshots or snapshots[-1].id != snap.id:
+							snapshots.append(snap)
+				
+				# Zaman sırasına göre sırala (en eski en başta)
+				snapshots.reverse()
+				
+				if snapshots and len(snapshots) > 1:
+					dates = [s.created_at.strftime("%H:%M") for s in snapshots]
+					equities = [s.total_equity if s.total_equity is not None else s.total_wallet_balance for s in snapshots]
+					
+					# 0 değerlerini interpolasyon ile doldur
+					for i in range(len(equities)):
+						if equities[i] == 0 or equities[i] is None:
+							# Önceki geçerli değeri bul
+							prev_val = None
+							for j in range(i - 1, -1, -1):
+								if equities[j] != 0 and equities[j] is not None:
+									prev_val = equities[j]
+									break
+							
+							# Sonraki geçerli değeri bul
+							next_val = None
+							for j in range(i + 1, len(equities)):
+								if equities[j] != 0 and equities[j] is not None:
+									next_val = equities[j]
+									break
+							
+							# Interpolasyon yap
+							if prev_val is not None and next_val is not None:
+								# Linear interpolation
+								equities[i] = (prev_val + next_val) / 2
+							elif prev_val is not None:
+								equities[i] = prev_val
+							elif next_val is not None:
+								equities[i] = next_val
+							else:
+								# Hiç geçerli değer yoksa 0 bırak
+								equities[i] = 0
 					
 					plt.figure(figsize=(10, 5))
 					plt.plot(dates, equities, marker='o', linestyle='-', color='b', markersize=4)
-					plt.title('Toplam Bakiye (Equity) - Son 48 Saat')
+					plt.title('Toplam Bakiye (Equity) - Son 24 Saat')
 					plt.xlabel('Saat')
 					plt.ylabel('USDT')
 					plt.grid(True, which='both', linestyle='--', linewidth=0.5)

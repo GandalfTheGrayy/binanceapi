@@ -7,7 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from .database import init_db, SessionLocal
 from .routers import webhook
 from apscheduler.schedulers.background import BackgroundScheduler
-from datetime import datetime
+from datetime import datetime, timedelta
 from .config import get_settings
 from .services.binance_client import BinanceFuturesClient
 from .services.telegram import TelegramNotifier
@@ -15,6 +15,7 @@ from .services.telegram_commands import init_command_handler, start_polling_loop
 from . import models, schemas
 from .state import runtime
 from .services.ws_manager import ws_manager
+from .services.webhook_worker import webhook_worker
 import socket
 from .services.order_sizing import get_symbol_filters, round_step
 from .services.risk_manager import check_early_losses
@@ -51,6 +52,7 @@ app.include_router(webhook.router)
 # Aynı webhook işlevini doğrudan kökte de kabul ediyoruz
 @app.post("/", response_model=schemas.OrderResult)
 async def root_webhook_adapter(payload: schemas.TradingViewWebhook, request: Request):
+	# Queue sistemini kullan
 	db = SessionLocal()
 	try:
 		return await webhook.handle_tradingview(payload, request, db)
@@ -248,16 +250,61 @@ def hourly_pnl_job():
             # 3. Generate Graph
             graph_bio = None
             try:
-                last_snaps = db.query(models.BalanceSnapshot).order_by(models.BalanceSnapshot.id.desc()).limit(48).all()
-                last_snaps.reverse()
+                # Zaman bazlı veri çekme: Son 24 saat için her saat için en yakın snapshot'ı al
+                end_time = datetime.utcnow()
+                snapshots = []
                 
-                if last_snaps and len(last_snaps) > 1:
-                    dates = [s.created_at.strftime("%H:%M") for s in last_snaps]
-                    equities = [s.total_equity if s.total_equity is not None else s.total_wallet_balance for s in last_snaps]
+                for hour_offset in range(24):
+                    target_time = end_time - timedelta(hours=hour_offset)
+                    # Her saat için en yakın snapshot'ı bul (30 dakika tolerans)
+                    snap = db.query(models.BalanceSnapshot).filter(
+                        models.BalanceSnapshot.created_at <= target_time
+                    ).order_by(models.BalanceSnapshot.created_at.desc()).first()
+                    
+                    if snap:
+                        # Aynı snapshot'ı tekrar eklememek için kontrol et
+                        if not snapshots or snapshots[-1].id != snap.id:
+                            snapshots.append(snap)
+                
+                # Zaman sırasına göre sırala (en eski en başta)
+                snapshots.reverse()
+                
+                if snapshots and len(snapshots) > 1:
+                    dates = [s.created_at.strftime("%H:%M") for s in snapshots]
+                    equities = [s.total_equity if s.total_equity is not None else s.total_wallet_balance for s in snapshots]
+                    
+                    # 0 değerlerini interpolasyon ile doldur
+                    for i in range(len(equities)):
+                        if equities[i] == 0 or equities[i] is None:
+                            # Önceki geçerli değeri bul
+                            prev_val = None
+                            for j in range(i - 1, -1, -1):
+                                if equities[j] != 0 and equities[j] is not None:
+                                    prev_val = equities[j]
+                                    break
+                            
+                            # Sonraki geçerli değeri bul
+                            next_val = None
+                            for j in range(i + 1, len(equities)):
+                                if equities[j] != 0 and equities[j] is not None:
+                                    next_val = equities[j]
+                                    break
+                            
+                            # Interpolasyon yap
+                            if prev_val is not None and next_val is not None:
+                                # Linear interpolation
+                                equities[i] = (prev_val + next_val) / 2
+                            elif prev_val is not None:
+                                equities[i] = prev_val
+                            elif next_val is not None:
+                                equities[i] = next_val
+                            else:
+                                # Hiç geçerli değer yoksa 0 bırak
+                                equities[i] = 0
                     
                     plt.figure(figsize=(10, 5))
                     plt.plot(dates, equities, marker='o', linestyle='-', color='b', markersize=4)
-                    plt.title('Toplam Bakiye (Equity) - Son 48 Saat')
+                    plt.title('Toplam Bakiye (Equity) - Son 24 Saat')
                     plt.xlabel('Saat')
                     plt.ylabel('USDT')
                     plt.grid(True, which='both', linestyle='--', linewidth=0.5)
@@ -348,6 +395,13 @@ def on_startup():
 @app.on_event("shutdown")
 async def on_shutdown():
     global scheduler
+    # Webhook worker'ı durdur
+    try:
+        await webhook_worker.stop()
+        print("[Shutdown] Webhook worker durduruldu")
+    except Exception as e:
+        print(f"[Shutdown] Webhook worker durdurma hatası: {e}")
+    
     # Telegram polling'i durdur
     await stop_polling_loop()
     if scheduler:
@@ -358,6 +412,13 @@ async def on_shutdown():
 @app.on_event("startup")
 async def on_startup_async():
     settings = get_settings()
+    
+    # Webhook worker'ı başlat
+    try:
+        await webhook_worker.start()
+        print("[Startup] Webhook worker başlatıldı")
+    except Exception as e:
+        print(f"[Startup] Webhook worker başlatma hatası: {e}")
     
     # Ensure One-way mode on startup when live
     if settings.binance_api_key and settings.binance_api_secret and not settings.dry_run:

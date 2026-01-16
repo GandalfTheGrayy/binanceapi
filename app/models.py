@@ -11,6 +11,8 @@ class WebhookEvent(Base):
 	signal = Column(String(16), index=True)
 	price = Column(Float, nullable=True)
 	payload = Column(JSON)
+	status = Column(String(16), default="pending", index=True)  # pending, processing, completed, failed
+	retry_count = Column(Integer, default=0)
 	created_at = Column(DateTime(timezone=True), server_default=func.now(), index=True)
 
 
