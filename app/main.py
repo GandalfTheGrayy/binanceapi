@@ -11,7 +11,8 @@ from datetime import datetime, timedelta
 from .config import get_settings
 from .services.binance_client import BinanceFuturesClient
 from .services.telegram import TelegramNotifier
-from .services.telegram_commands import init_command_handler, start_polling_loop, stop_polling_loop
+# Telegram polling kaldırıldı - bot sadece mesaj gönderecek
+# from .services.telegram_commands import init_command_handler, start_polling_loop, stop_polling_loop
 from . import models, schemas
 from .state import runtime
 from .services.ws_manager import ws_manager
@@ -371,10 +372,10 @@ def on_startup():
     # Erken zarar kesme kontrolü (Her 15 dk) - Şimdilik pasif
     # scheduler.add_job(check_early_losses, "interval", minutes=15, id="check_early_losses_job", replace_existing=True)
     
-    # Telegram komut handler'ını başlat (asyncio task olarak - lifespan'da başlatılacak)
-    if settings.telegram_bot_token and settings.telegram_chat_id:
-        init_command_handler(settings.telegram_bot_token, settings.telegram_chat_id)
-        print("[Startup] Telegram komut handler'ı başlatıldı (polling lifespan'da başlayacak)")
+    # Telegram polling kaldırıldı - bot sadece mesaj gönderecek
+    # if settings.telegram_bot_token and settings.telegram_chat_id:
+    #     init_command_handler(settings.telegram_bot_token, settings.telegram_chat_id)
+    #     print("[Startup] Telegram komut handler'ı başlatıldı (polling lifespan'da başlayacak)")
     
     scheduler.start()
 
@@ -402,8 +403,8 @@ async def on_shutdown():
     except Exception as e:
         print(f"[Shutdown] Webhook worker durdurma hatası: {e}")
     
-    # Telegram polling'i durdur
-    await stop_polling_loop()
+    # Telegram polling kaldırıldı - bot sadece mesaj gönderecek
+    # await stop_polling_loop()
     if scheduler:
         scheduler.shutdown(wait=False)
 
@@ -461,9 +462,9 @@ async def on_startup_async():
         finally:
             await notifier.close()
         
-        # Telegram polling'i başlat
-        await start_polling_loop()
-        print("[Startup] Telegram polling loop başlatıldı")
+        # Telegram polling kaldırıldı - bot sadece mesaj gönderecek
+        # await start_polling_loop()
+        # print("[Startup] Telegram polling loop başlatıldı")
 
 # Streamlit proxy — tek servis altında UI'yı aynı domain üzerinden sunmak için
 STREAMLIT_INTERNAL_URL = os.getenv("STREAMLIT_INTERNAL_URL", "http://127.0.0.1:8501").rstrip("/")
