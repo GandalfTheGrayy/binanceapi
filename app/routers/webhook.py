@@ -420,15 +420,15 @@ async def process_webhook_request(queue_item: Dict[str, Any]) -> Dict[str, Any]:
 			if dual_mode:
 				position_side = "LONG" if side == "BUY" else "SHORT"
 			
-			# DB'den bu endpoint'in ters pozisyonunu kontrol et
+		# DB'den bu endpoint'in ters pozisyonunu kontrol et
+			opposite_detected = False
 			if db_position and db_position.qty > 0:
 				# Ters yönde pozisyon var mı?
-				opposite_detected = False
 				if side == "BUY" and db_position.side == "SHORT":
 					opposite_detected = True
 				elif side == "SELL" and db_position.side == "LONG":
 					opposite_detected = True
-				
+			
 			if opposite_detected:
 				close_qty = db_position.qty  # DB'deki miktar
 				# Mevcut pozisyonu kapatmak için gereken taraf:
