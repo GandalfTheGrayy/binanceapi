@@ -20,6 +20,18 @@ DRY_RUN=true
 LEVERAGE_POLICY=auto
 LEVERAGE_PER_SYMBOL=BTCUSDT:7,ETHUSDT:6
 
+# Layer 1 Ayarları (/webhook/tradingview endpoint'i)
+# Bu değerler DB'de config yoksa varsayılan olarak kullanılır
+LAYER1_TRADE_AMOUNT_USD=100
+LAYER1_MULTIPLIER=1.0
+LAYER1_LEVERAGE=5
+
+# Layer 2 Ayarları (/webhook/signal2 endpoint'i)
+# Bu değerler DB'de config yoksa varsayılan olarak kullanılır
+LAYER2_TRADE_AMOUNT_USD=100
+LAYER2_MULTIPLIER=1.0
+LAYER2_LEVERAGE=5
+
 # Telegram
 TELEGRAM_BOT_TOKEN=your_telegram_bot_token
 TELEGRAM_CHAT_ID=your_chat_id

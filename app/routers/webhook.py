@@ -13,7 +13,7 @@ from ..services.telegram import TelegramNotifier
 from ..state import runtime
 from ..services.ws_manager import ws_manager
 from ..services.symbols import normalize_tv_symbol
-from ..services.webhook_queue import webhook_queue
+from ..services.webhook_queue import webhook_queue_layer1, webhook_queue_layer2, get_webhook_queue
 
 router = APIRouter(prefix="/webhook", tags=["webhook"])
 
@@ -58,6 +58,64 @@ def _log_binance_call(db: Session, method: str, path: str, client: BinanceFuture
 	# Not committing here; rely on caller to commit alongside other records
 
 
+def get_or_create_endpoint_config(db: Session, endpoint: str) -> models.EndpointConfig:
+	"""Endpoint config'i DB'den al veya oluştur."""
+	config = db.query(models.EndpointConfig).filter_by(endpoint=endpoint).first()
+	if not config:
+		# .env'den varsayılan değerleri al
+		settings = get_settings()
+		env_config = settings.get_endpoint_config(endpoint)
+		config = models.EndpointConfig(
+			endpoint=endpoint,
+			trade_amount_usd=env_config["trade_amount_usd"],
+			multiplier=env_config["multiplier"],
+			leverage=env_config["leverage"],
+			enabled=True,
+		)
+		db.add(config)
+		db.commit()
+		db.refresh(config)
+	return config
+
+
+def get_endpoint_position(db: Session, endpoint: str, symbol: str) -> models.EndpointPosition | None:
+	"""Endpoint'in belirli bir coin için pozisyonunu al."""
+	return db.query(models.EndpointPosition).filter_by(
+		endpoint=endpoint,
+		symbol=symbol
+	).first()
+
+
+def update_endpoint_position(db: Session, endpoint: str, symbol: str, side: str, qty: float, entry_price: float | None = None):
+	"""Endpoint pozisyonunu güncelle veya oluştur."""
+	position = get_endpoint_position(db, endpoint, symbol)
+	
+	if qty == 0:
+		# Pozisyon kapatıldı, kaydı sil veya sıfırla
+		if position:
+			db.delete(position)
+		return None
+	
+	if position:
+		# Mevcut pozisyonu güncelle
+		position.side = side
+		position.qty = qty
+		if entry_price:
+			position.entry_price = entry_price
+	else:
+		# Yeni pozisyon oluştur
+		position = models.EndpointPosition(
+			endpoint=endpoint,
+			symbol=symbol,
+			side=side,
+			qty=qty,
+			entry_price=entry_price,
+		)
+		db.add(position)
+	
+	return position
+
+
 @router.post("/tradingview", response_model=schemas.OrderResult)
 async def handle_tradingview(
 	payload: schemas.TradingViewWebhook,
@@ -65,9 +123,31 @@ async def handle_tradingview(
 	db: Session = Depends(get_db)
 ):
 	"""
-	Webhook endpoint: İsteği queue'ya ekler ve hemen 200 OK döner.
+	Layer 1 Webhook endpoint: İsteği queue'ya ekler ve hemen 200 OK döner.
 	İşleme worker tarafından yapılacak.
 	"""
+	return await _enqueue_webhook(payload, request, endpoint="layer1")
+
+
+@router.post("/signal2", response_model=schemas.OrderResult)
+async def handle_signal2(
+	payload: schemas.TradingViewWebhook,
+	request: Request,
+	db: Session = Depends(get_db)
+):
+	"""
+	Layer 2 Webhook endpoint: İsteği queue'ya ekler ve hemen 200 OK döner.
+	İşleme worker tarafından yapılacak.
+	"""
+	return await _enqueue_webhook(payload, request, endpoint="layer2")
+
+
+async def _enqueue_webhook(
+	payload: schemas.TradingViewWebhook,
+	request: Request,
+	endpoint: str = "layer1"
+) -> Dict[str, Any]:
+	"""Webhook isteğini ilgili endpoint queue'suna ekler."""
 	settings = get_settings()
 	
 	# Fill symbol from ticker if missing
@@ -79,9 +159,12 @@ async def handle_tradingview(
 	# Get client IP
 	client_ip = get_client_ip(request)
 
+	# İlgili queue'yu al
+	queue = get_webhook_queue(endpoint)
+
 	# Queue'ya ekle (memory-first, çok hızlı)
 	try:
-		queue_item = await webhook_queue.enqueue(
+		queue_item = await queue.enqueue(
 			payload=payload.dict(),
 			client_ip=client_ip,
 			symbol=symbol,
@@ -90,11 +173,11 @@ async def handle_tradingview(
 		)
 	except Exception as e:
 		# Queue'ya ekleme başarısız olsa bile 200 OK dön (TradingView tekrar göndermesin)
-		print(f"[Webhook] Queue'ya ekleme hatası: {e}")
+		print(f"[Webhook-{endpoint}] Queue'ya ekleme hatası: {e}")
 		# Yine de 200 OK dön
 		return {
 			"success": True,
-			"message": "Webhook alındı, işleniyor...",
+			"message": f"Webhook alındı ({endpoint}), işleniyor...",
 			"order_id": None,
 			"response": None,
 		}
@@ -102,9 +185,9 @@ async def handle_tradingview(
 	# Hemen 200 OK dön (<10ms)
 	return {
 		"success": True,
-		"message": "Webhook alındı, queue'ya eklendi, işleniyor...",
+		"message": f"Webhook alındı ({endpoint}), queue'ya eklendi, işleniyor...",
 		"order_id": None,
-		"response": {"queue_id": queue_item.get("queue_id")},
+		"response": {"queue_id": queue_item.get("queue_id"), "endpoint": endpoint},
 	}
 
 
@@ -116,23 +199,33 @@ async def process_webhook_request(queue_item: Dict[str, Any]) -> Dict[str, Any]:
 	settings = get_settings()
 	db = SessionLocal()
 	notifier = TelegramNotifier(settings.telegram_bot_token, settings.telegram_chat_id)
+	db_id = queue_item.get("db_id")
+	
+	def update_webhook_status(status: str):
+		"""DB'deki webhook event status'unu güncelle."""
+		nonlocal db_id
+		if db_id:
+			try:
+				evt = db.query(models.WebhookEvent).filter_by(id=db_id).first()
+				if evt:
+					evt.status = status
+					db.commit()
+			except Exception as e:
+				print(f"[Webhook] Status güncelleme hatası: {e}")
 	
 	try:
 		symbol = queue_item["symbol"]
 		signal = queue_item["signal"]
 		payload_dict = queue_item.get("payload", {})
 		price = queue_item.get("price")
+		endpoint = queue_item.get("endpoint", "layer1")
+		endpoint_label = "Layer1" if endpoint == "layer1" else "Layer2"
 		
 		# Payload'dan TradingViewWebhook oluştur
 		payload = schemas.TradingViewWebhook(**payload_dict)
 		
 		# DB'de status'u processing yap
-		db_id = queue_item.get("db_id")
-		if db_id:
-			evt = db.query(models.WebhookEvent).filter_by(id=db_id).first()
-			if evt:
-				evt.status = "processing"
-				db.commit()
+		update_webhook_status("processing")
 		
 		# Broadcast to WS
 		if db_id:
@@ -142,6 +235,7 @@ async def process_webhook_request(queue_item: Dict[str, Any]) -> Dict[str, Any]:
 					"type": "webhook_event",
 					"data": {
 						"id": evt.id,
+						"endpoint": endpoint,
 						"symbol": evt.symbol,
 						"signal": evt.signal,
 						"price": evt.price,
@@ -153,9 +247,12 @@ async def process_webhook_request(queue_item: Dict[str, Any]) -> Dict[str, Any]:
 		signal_upper = signal.upper()
 		if signal_upper in ("AL", "BUY", "LONG"):
 			side = "BUY"
+			new_position_side = "LONG"
 		elif signal_upper in ("SAT", "SELL", "SHORT"):
 			side = "SELL"
+			new_position_side = "SHORT"
 		else:
+			update_webhook_status("failed")
 			return {
 				"success": False,
 				"error": "Unsupported signal",
@@ -163,64 +260,59 @@ async def process_webhook_request(queue_item: Dict[str, Any]) -> Dict[str, Any]:
 				"response": None,
 			}
 		
+		# Endpoint config'i al (DB öncelikli, yoksa .env'den)
+		endpoint_config = get_or_create_endpoint_config(db, endpoint)
+		
+		if not endpoint_config.enabled:
+			update_webhook_status("failed")
+			return {
+				"success": False,
+				"error": f"{endpoint_label} endpoint devre dışı",
+				"order_id": None,
+				"response": None,
+			}
+		
+		# Bu endpoint'in bu coin için mevcut pozisyonunu kontrol et (DB'den)
+		db_position = get_endpoint_position(db, endpoint, symbol)
+		
+		# Aynı yönde pozisyon var mı kontrolü
+		if db_position and db_position.qty > 0:
+			if db_position.side == new_position_side:
+				try:
+					skip_msg = [
+						f"⛔ İşlem Yapılmadı [{endpoint_label}]: Aynı Yönde Pozisyon İsteği",
+						"",
+						f"Symbol: {symbol}",
+						f"İstek: {side}",
+						f"Mevcut DB Pozisyon: {db_position.side} {db_position.qty}",
+						"",
+						"Aynı yönde açık pozisyon olduğu için yeni işlem açılmadı."
+					]
+					await notifier.send_message("\n".join(skip_msg))
+				except Exception:
+					pass
+				
+				update_webhook_status("completed")
+				
+				return {
+					"success": True,
+					"message": f"İşlem yapılmadı: {symbol} üzerinde zaten aynı yönde ({db_position.side}) pozisyon var ({endpoint_label}).",
+					"order_id": None,
+					"response": {"db_position": {"side": db_position.side, "qty": db_position.qty}},
+				}
+		
 		async with BinanceFuturesClient(
 			api_key=settings.binance_api_key,
 			api_secret=settings.binance_api_secret,
 			base_url=settings.binance_base_url,
 		) as client:
-			# Check for existing position in the same direction
-			try:
-				positions_check = await client.positions(symbols=[symbol])
-				_log_binance_call(db, "GET", "/fapi/v2/positionRisk", client, response_data=positions_check)
-				
-				for pos in positions_check:
-					if pos.get("symbol") == symbol:
-						amt = float(pos.get("positionAmt", 0) or 0)
-						should_skip = False
-						
-						if side == "BUY" and amt > 0:
-							should_skip = True
-						elif side == "SELL" and amt < 0:
-							should_skip = True
-						
-						if should_skip:
-							try:
-								skip_msg = [
-									"⛔ İşlem Yapılmadı: Aynı Yönde Pozisyon İsteği",
-									"",
-									f"Symbol: {symbol}",
-									f"İstek: {side}",
-									f"Mevcut Pozisyon: {amt}",
-									"",
-									"Aynı yönde açık pozisyon olduğu için yeni işlem açılmadı."
-								]
-								await notifier.send_message("\n".join(skip_msg))
-							except Exception:
-								pass
-							
-							# DB'de status'u completed yap
-							if db_id:
-								evt = db.query(models.WebhookEvent).filter_by(id=db_id).first()
-								if evt:
-									evt.status = "completed"
-									db.commit()
-							
-							return {
-								"success": True,
-								"message": f"İşlem yapılmadı: {symbol} üzerinde zaten aynı yönde ({'LONG' if amt > 0 else 'SHORT'}) pozisyon var.",
-								"order_id": None,
-								"response": {"positionAmt": amt},
-							}
-						break 
-			except Exception as e:
-				_log_binance_call(db, "GET", "/fapi/v2/positionRisk", client, error=str(e))
-			
 			# Exchange info
 			try:
 				ex_info = await client.exchange_info()
 				_log_binance_call(db, "GET", "/fapi/v1/exchangeInfo", client, response_data=ex_info)
 			except Exception as e:
 				_log_binance_call(db, "GET", "/fapi/v1/exchangeInfo", client, error=str(e))
+				update_webhook_status("failed")
 				return {
 					"success": False,
 					"error": f"exchangeInfo hatası: {e}",
@@ -247,6 +339,7 @@ async def process_webhook_request(queue_item: Dict[str, Any]) -> Dict[str, Any]:
 					force_msg = "Pozisyon modu One-way olarak ayarlandı."
 				except Exception as e:
 					_log_binance_call(db, "POST", "/fapi/v1/positionSide/dual", client, error=str(e))
+					update_webhook_status("failed")
 					return {
 						"success": False,
 						"error": f"Pozisyon modu One-way'a çekilemedi: {e}",
@@ -265,6 +358,7 @@ async def process_webhook_request(queue_item: Dict[str, Any]) -> Dict[str, Any]:
 					balance_before = available_balance
 				except Exception as e:
 					_log_binance_call(db, "GET", "/fapi/v2/balance", client, error=str(e))
+					update_webhook_status("failed")
 					return {
 						"success": False,
 						"error": f"Balance alınamadı: {e}",
@@ -272,8 +366,8 @@ async def process_webhook_request(queue_item: Dict[str, Any]) -> Dict[str, Any]:
 						"response": None,
 					}
 			
-			# Leverage
-			leverage = int(runtime.default_leverage or settings.default_leverage or 1)
+			# Leverage - endpoint config'den al
+			leverage = endpoint_config.leverage or settings.default_leverage or 1
 			
 			# Get price
 			try:
@@ -283,6 +377,7 @@ async def process_webhook_request(queue_item: Dict[str, Any]) -> Dict[str, Any]:
 					raise ValueError("Geçersiz fiyat")
 			except Exception as e:
 				_log_binance_call(db, "GET", "/fapi/v1/ticker/price", client, error=str(e))
+				update_webhook_status("failed")
 				return {
 					"success": False,
 					"error": f"Fiyat bilgisi alınamadı: {e}",
@@ -290,14 +385,12 @@ async def process_webhook_request(queue_item: Dict[str, Any]) -> Dict[str, Any]:
 					"response": None,
 				}
 			
-			# Quantity calculation
+			# Quantity calculation - endpoint config'den al
 			filters = get_symbol_filters(ex_info, symbol)
 			step = filters["stepSize"] or 0.0001
 			
-			if runtime.fixed_trade_amount and runtime.fixed_trade_amount > 0:
-				trade_amount_usdt = float(runtime.fixed_trade_amount)
-			else:
-				trade_amount_usdt = available_balance * 0.10
+			# Endpoint config'den trade amount ve multiplier al
+			trade_amount_usdt = endpoint_config.trade_amount_usd * endpoint_config.multiplier
 			
 			lev = max(1, int(leverage or 1))
 			notional = trade_amount_usdt * lev
@@ -313,6 +406,7 @@ async def process_webhook_request(queue_item: Dict[str, Any]) -> Dict[str, Any]:
 			order_qty = float(formatted_qty)
 			
 			if order_qty <= 0 or order_qty < filters["minQty"]:
+				update_webhook_status("failed")
 				return {
 					"success": False,
 					"error": "Hesaplanan quantity minimum lot size'dan küçük",
@@ -320,45 +414,50 @@ async def process_webhook_request(queue_item: Dict[str, Any]) -> Dict[str, Any]:
 					"response": None,
 				}
 			
-			# Close opposite position
+			# ===== TERS POZİSYON KAPATMA (DB'DEN MİKTAR AL) =====
 			closed_position_msg = None
 			position_side = None
 			if dual_mode:
 				position_side = "LONG" if side == "BUY" else "SHORT"
 			
-			try:
-				cur_positions = await client.positions([symbol])
-				_log_binance_call(db, "GET", "/fapi/v2/positionRisk", client, response_data=cur_positions)
+			# DB'den bu endpoint'in ters pozisyonunu kontrol et
+			if db_position and db_position.qty > 0:
+				# Ters yönde pozisyon var mı?
+				opposite_detected = False
+				if side == "BUY" and db_position.side == "SHORT":
+					opposite_detected = True
+				elif side == "SELL" and db_position.side == "LONG":
+					opposite_detected = True
 				
-				for p in cur_positions:
-					if p.get("symbol") == symbol:
-						amt = float(p.get("positionAmt", 0) or 0)
-						opposite_side = None
-						if side == "BUY" and amt < 0:
-							opposite_side = "BUY"
-						elif side == "SELL" and amt > 0:
-							opposite_side = "SELL"
+			if opposite_detected:
+				close_qty = db_position.qty  # DB'deki miktar
+				# Mevcut pozisyonu kapatmak için gereken taraf:
+				# SHORT kapatmak için BUY, LONG kapatmak için SELL
+				close_side = "BUY" if db_position.side == "SHORT" else "SELL"
+				
+				if not settings.dry_run:
+					try:
+						close_resp = await client.place_market_order(
+							symbol, 
+							close_side, 
+							close_qty, 
+							position_side=db_position.side if dual_mode else None,
+							reduce_only=True
+						)
+						_log_binance_call(db, "POST", "/fapi/v1/order (close)", client, response_data=close_resp)
+						closed_position_msg = f"[{endpoint_label}] Ters pozisyon kapatıldı: {close_side} {close_qty} (eski: {db_position.side})"
 						
-						if opposite_side:
-							close_qty = abs(amt)
-							if not settings.dry_run:
-								try:
-									close_resp = await client.place_market_order(
-										symbol, 
-										opposite_side, 
-										close_qty, 
-										position_side=position_side if dual_mode else None,
-										reduce_only=True
-									)
-									_log_binance_call(db, "POST", "/fapi/v1/order (close)", client, response_data=close_resp)
-									closed_position_msg = f"Ters pozisyon kapatıldı: {opposite_side} {close_qty}"
-								except Exception as e:
-									_log_binance_call(db, "POST", "/fapi/v1/order (close)", client, error=str(e))
-							else:
-								closed_position_msg = f"[DRY_RUN] Ters pozisyon kapatılacaktı: {opposite_side} {close_qty}"
-						break
-			except Exception as e:
-				_log_binance_call(db, "GET", "/fapi/v2/positionRisk", client, error=str(e))
+						# DB'deki pozisyonu sıfırla
+						update_endpoint_position(db, endpoint, symbol, "", 0, None)
+						db.commit()
+					except Exception as e:
+						_log_binance_call(db, "POST", "/fapi/v1/order (close)", client, error=str(e))
+						# Hata olsa bile devam et, belki Binance'de pozisyon yoktur
+				else:
+					closed_position_msg = f"[{endpoint_label}][DRY_RUN] Ters pozisyon kapatılacaktı: {close_side} {close_qty} (eski: {db_position.side})"
+					# Dry run'da da DB'yi güncelle
+					update_endpoint_position(db, endpoint, symbol, "", 0, None)
+					db.commit()
 			
 			# Bracket check
 			bracket_warn = None
@@ -390,6 +489,7 @@ async def process_webhook_request(queue_item: Dict[str, Any]) -> Dict[str, Any]:
 				_log_binance_call(db, "GET", "/fapi/v2/positionRisk", client, error=str(e))
 			
 			if (not settings.dry_run) and order_qty <= 0:
+				update_webhook_status("failed")
 				return {
 					"success": False,
 					"error": "Mevcut kaldıraç seviyesinde izin verilen maksimum pozisyon sınırı nedeniyle yeni pozisyon açılamıyor (maxNotional).",
@@ -402,6 +502,7 @@ async def process_webhook_request(queue_item: Dict[str, Any]) -> Dict[str, Any]:
 			if settings.dry_run:
 				order_response = {
 					"dry_run": True,
+					"endpoint": endpoint,
 					"symbol": symbol,
 					"side": side,
 					"qty": order_qty,
@@ -426,6 +527,7 @@ async def process_webhook_request(queue_item: Dict[str, Any]) -> Dict[str, Any]:
 							extra = e.response.text
 					err_msg = f"Leverage ayarlanamadı: {e}" + (f" | Binance: {extra}" if extra else "")
 					_log_binance_call(db, "POST", "/fapi/v1/leverage", client, error=err_msg)
+					update_webhook_status("failed")
 					return {
 						"success": False,
 						"error": err_msg,
@@ -463,6 +565,7 @@ async def process_webhook_request(queue_item: Dict[str, Any]) -> Dict[str, Any]:
 							extra = e.response.text
 					err_msg = f"Emir başarısız: {e}" + (f" | Binance: {extra}" if extra else "")
 					_log_binance_call(db, "POST", "/fapi/v1/order", client, error=err_msg)
+					update_webhook_status("failed")
 					return {
 						"success": False,
 						"error": err_msg,
@@ -470,8 +573,12 @@ async def process_webhook_request(queue_item: Dict[str, Any]) -> Dict[str, Any]:
 						"response": None,
 					}
 			
+			# ===== DB'DE POZİSYON MİKTARINI GÜNCELLE =====
+			update_endpoint_position(db, endpoint, symbol, new_position_side, order_qty, current_price)
+			
 			# Save order record
 			order = models.OrderRecord(
+				endpoint=endpoint,
 				symbol=symbol,
 				side=side,
 				position_side=position_side,
@@ -500,24 +607,41 @@ async def process_webhook_request(queue_item: Dict[str, Any]) -> Dict[str, Any]:
 				total_wallet_balance=balance_after + margin_used,
 				available_balance=balance_after,
 				used_allocation_usd=margin_used,
-				note=f"Trade: {symbol} {side} qty={order_qty} margin={margin_used:.2f} USDT (available balance %10)",
+				note=f"[{endpoint_label}] Trade: {symbol} {side} qty={order_qty} margin={margin_used:.2f} USDT",
 			)
 			db.add(snap)
 			db.commit()
 			
-			# DB'de status'u completed yap
-			if db_id:
-				evt = db.query(models.WebhookEvent).filter_by(id=db_id).first()
-				if evt:
-					evt.status = "completed"
-					db.commit()
+			# ===== BAŞARI KONTROLÜ: Binance Order ID var mı? =====
+			binance_order_id = order.binance_order_id
 			
-			return {
-				"success": True,
-				"order_id": order.binance_order_id,
-				"response": order_response,
-				"error": None,
-			}
+			if binance_order_id and binance_order_id != "None":
+				# Başarılı - Binance Order ID geldi
+				update_webhook_status("completed")
+				return {
+					"success": True,
+					"order_id": binance_order_id,
+					"response": order_response,
+					"error": None,
+				}
+			elif settings.dry_run:
+				# DRY_RUN modunda Order ID gelmez, yine de başarılı sayılır
+				update_webhook_status("completed")
+				return {
+					"success": True,
+					"order_id": None,
+					"response": order_response,
+					"error": None,
+				}
+			else:
+				# Binance Order ID gelmedi - başarısız
+				update_webhook_status("failed")
+				return {
+					"success": False,
+					"order_id": None,
+					"response": order_response,
+					"error": "Binance Order ID alınamadı",
+				}
 	finally:
 		await notifier.close()
 		db.close()

@@ -20,6 +20,16 @@ class Settings(BaseSettings):
 	leverage_policy: str = Field(default="auto", alias="LEVERAGE_POLICY")  # auto|webhook|per_symbol|default
 	leverage_per_symbol_str: str = Field(default="", alias="LEVERAGE_PER_SYMBOL")  # e.g. BTCUSDT:7,ETHUSDT:6
 
+	# Layer 1 (mevcut endpoint: /webhook/tradingview)
+	layer1_trade_amount_usd: float = Field(default=100.0, alias="LAYER1_TRADE_AMOUNT_USD")
+	layer1_multiplier: float = Field(default=1.0, alias="LAYER1_MULTIPLIER")
+	layer1_leverage: int = Field(default=5, alias="LAYER1_LEVERAGE")
+
+	# Layer 2 (yeni endpoint: /webhook/signal2)
+	layer2_trade_amount_usd: float = Field(default=100.0, alias="LAYER2_TRADE_AMOUNT_USD")
+	layer2_multiplier: float = Field(default=1.0, alias="LAYER2_MULTIPLIER")
+	layer2_leverage: int = Field(default=5, alias="LAYER2_LEVERAGE")
+
 	telegram_bot_token: str = Field(default="", alias="TELEGRAM_BOT_TOKEN")
 	telegram_chat_id: str = Field(default="", alias="TELEGRAM_CHAT_ID")
 
@@ -77,6 +87,21 @@ class Settings(BaseSettings):
 		if payload_leverage:
 			return int(payload_leverage)
 		return self.leverage_map().get(symbol, int(self.default_leverage))
+
+	def get_endpoint_config(self, endpoint: str) -> Dict[str, any]:
+		"""Endpoint için varsayılan config değerlerini döndür (.env'den)"""
+		if endpoint == "layer2":
+			return {
+				"trade_amount_usd": self.layer2_trade_amount_usd,
+				"multiplier": self.layer2_multiplier,
+				"leverage": self.layer2_leverage,
+			}
+		# Default: layer1
+		return {
+			"trade_amount_usd": self.layer1_trade_amount_usd,
+			"multiplier": self.layer1_multiplier,
+			"leverage": self.layer1_leverage,
+		}
 
 
 @lru_cache()

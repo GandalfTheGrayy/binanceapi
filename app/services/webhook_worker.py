@@ -6,7 +6,7 @@ from ..database import SessionLocal
 from .. import models
 from ..config import get_settings
 from ..services.telegram import TelegramNotifier
-from ..services.webhook_queue import webhook_queue
+from ..services.webhook_queue import webhook_queue_layer1, webhook_queue_layer2, get_webhook_queue
 from ..services.binance_client import BinanceFuturesClient
 from ..services.order_sizing import get_symbol_filters, round_step
 from ..state import runtime
@@ -19,9 +19,15 @@ import json
 class WebhookWorker:
 	"""Background worker: Queue'dan webhook isteklerini alıp işler."""
 	
-	def __init__(self):
+	def __init__(self, endpoint: str = "layer1"):
+		self.endpoint = endpoint
 		self.running = False
 		self._task: Optional[asyncio.Task] = None
+		self._queue = get_webhook_queue(endpoint)
+	
+	@property
+	def endpoint_label(self) -> str:
+		return "Layer1" if self.endpoint == "layer1" else "Layer2"
 	
 	async def start(self):
 		"""Worker'ı başlat."""
@@ -29,7 +35,7 @@ class WebhookWorker:
 			return
 		self.running = True
 		self._task = asyncio.create_task(self._worker_loop())
-		print("[WebhookWorker] Worker başlatıldı")
+		print(f"[WebhookWorker-{self.endpoint_label}] Worker başlatıldı")
 		
 		# Startup'ta DB'deki pending istekleri yükle
 		await self.recover_pending_webhooks()
@@ -43,10 +49,10 @@ class WebhookWorker:
 				await self._task
 			except asyncio.CancelledError:
 				pass
-		print("[WebhookWorker] Worker durduruldu")
+		print(f"[WebhookWorker-{self.endpoint_label}] Worker durduruldu")
 	
 	async def recover_pending_webhooks(self):
-		"""Startup'ta DB'deki pending istekleri memory queue'ya yükle."""
+		"""Startup'ta DB'deki bu endpoint'e ait pending istekleri memory queue'ya yükle."""
 		settings = get_settings()
 		notifier = TelegramNotifier(settings.telegram_bot_token, settings.telegram_chat_id)
 		
@@ -55,15 +61,17 @@ class WebhookWorker:
 			try:
 				pending_events = db.query(models.WebhookEvent)\
 					.filter(models.WebhookEvent.status == "pending")\
+					.filter(models.WebhookEvent.endpoint == self.endpoint)\
 					.order_by(models.WebhookEvent.id.asc())\
 					.all()
 				
 				if pending_events:
-					print(f"[WebhookWorker] {len(pending_events)} pending istek bulundu, queue'ya yükleniyor...")
+					print(f"[WebhookWorker-{self.endpoint_label}] {len(pending_events)} pending istek bulundu, queue'ya yükleniyor...")
 					
 					for evt in pending_events:
 						queue_item = {
 							"queue_id": evt.id,
+							"endpoint": self.endpoint,
 							"payload": evt.payload or {},
 							"client_ip": "unknown",
 							"symbol": evt.symbol,
@@ -72,11 +80,11 @@ class WebhookWorker:
 							"created_at": evt.created_at,
 							"db_id": evt.id,  # DB'den geldiğini belirt
 						}
-						await webhook_queue.queue.put(queue_item)
+						await self._queue.queue.put(queue_item)
 					
 					try:
 						msg = [
-							"🔄 Restart Recovery",
+							f"🔄 Restart Recovery [{self.endpoint_label}]",
 							f"{len(pending_events)} pending istek queue'ya yüklendi",
 							"",
 							"📋 Yüklenen İstekler:",
@@ -87,7 +95,7 @@ class WebhookWorker:
 							msg.append(f"... ve {len(pending_events) - 10} istek daha")
 						await notifier.send_message("\n".join(msg))
 					except Exception as e:
-						print(f"[WebhookWorker] Telegram bildirim hatası (recovery): {e}")
+						print(f"[WebhookWorker-{self.endpoint_label}] Telegram bildirim hatası (recovery): {e}")
 			finally:
 				db.close()
 		finally:
@@ -101,7 +109,7 @@ class WebhookWorker:
 			try:
 				# Memory queue'dan istek al (FIFO) - sürekli bekler
 				try:
-					queue_item = await asyncio.wait_for(webhook_queue.queue.get(), timeout=1.0)
+					queue_item = await asyncio.wait_for(self._queue.queue.get(), timeout=1.0)
 				except asyncio.TimeoutError:
 					# Queue boşsa kısa bekleme ve tekrar dene
 					await asyncio.sleep(0.1)
@@ -111,13 +119,13 @@ class WebhookWorker:
 					# Telegram'a bildir: Queue'dan işlem alındı
 					notifier = TelegramNotifier(settings.telegram_bot_token, settings.telegram_chat_id)
 					try:
-						queue_status = await webhook_queue.get_queue_status()
+						queue_status = await self._queue.get_queue_status()
 						msg_lines = [
-							"🔄 Queue'dan İşlem Alındı",
+							f"🔄 Queue'dan İşlem Alındı [{self.endpoint_label}]",
 							f"Symbol: {queue_item['symbol']}",
 							f"Signal: {queue_item['signal'].upper()}",
 							f"Queue ID: {queue_item.get('queue_id', 'N/A')}",
-							f"📊 Kalan Queue: {queue_status['count']} istek",
+							f"📊 Kalan {self.endpoint_label} Queue: {queue_status['count']} istek",
 							"",
 							"📋 Kalan Queue İçeriği:",
 						]
@@ -130,7 +138,7 @@ class WebhookWorker:
 							msg_lines.append("(Queue boş)")
 						await notifier.send_message("\n".join(msg_lines))
 					except Exception as e:
-						print(f"[WebhookWorker] Telegram bildirim hatası (işlem alındı): {e}")
+						print(f"[WebhookWorker-{self.endpoint_label}] Telegram bildirim hatası (işlem alındı): {e}")
 					finally:
 						await notifier.close()
 					
@@ -143,25 +151,32 @@ class WebhookWorker:
 						notifier = TelegramNotifier(settings.telegram_bot_token, settings.telegram_chat_id)
 						try:
 							processing_time = (datetime.utcnow() - start_time).total_seconds()
-							queue_status = await webhook_queue.get_queue_status()
+							queue_status = await self._queue.get_queue_status()
 							
-							if result.get("success"):
+							# Başarı kontrolü: Binance Order ID varsa başarılı
+							order_id = result.get("order_id")
+							is_dry_run = result.get("response", {}).get("dry_run", False) if result.get("response") else False
+							
+							if order_id and order_id != "None":
 								status_icon = "✅"
-								status_text = "Başarılı"
+								status_text = "BAŞARILI"
+							elif is_dry_run:
+								status_icon = "🔸"
+								status_text = "DRY_RUN (Simülasyon)"
 							else:
 								status_icon = "❌"
-								status_text = "Başarısız"
+								status_text = "BAŞARISIZ"
 							
 							msg_lines = [
-								f"{status_icon} İşlem Sonucu",
+								f"{status_icon} İşlem Sonucu [{self.endpoint_label}]",
 								f"Symbol: {queue_item['symbol']}",
 								f"Signal: {queue_item['signal'].upper()}",
 								f"Durum: {status_text}",
 								f"İşlem Süresi: {processing_time:.2f}s",
 							]
 							
-							if result.get("order_id"):
-								msg_lines.append(f"Binance Order ID: {result['order_id']}")
+							if order_id and order_id != "None":
+								msg_lines.append(f"🎯 Binance Order ID: {order_id}")
 							
 							if result.get("error"):
 								msg_lines.append("")
@@ -177,7 +192,7 @@ class WebhookWorker:
 									msg_lines.append(str(result['response']))
 							
 							msg_lines.append("")
-							msg_lines.append(f"📊 Kalan Queue: {queue_status['count']} istek")
+							msg_lines.append(f"📊 Kalan {self.endpoint_label} Queue: {queue_status['count']} istek")
 							msg_lines.append("")
 							msg_lines.append("📋 Kalan Queue İçeriği:")
 							if queue_status['items']:
@@ -190,12 +205,12 @@ class WebhookWorker:
 							
 							await notifier.send_message("\n".join(msg_lines))
 						except Exception as e:
-							print(f"[WebhookWorker] Telegram bildirim hatası (işlem sonucu): {e}")
+							print(f"[WebhookWorker-{self.endpoint_label}] Telegram bildirim hatası (işlem sonucu): {e}")
 						finally:
 							await notifier.close()
 					except Exception as e:
 						# İşleme hatası
-						print(f"[WebhookWorker] İşleme hatası: {e}")
+						print(f"[WebhookWorker-{self.endpoint_label}] İşleme hatası: {e}")
 						
 						# Retry mekanizması
 						retry_count = queue_item.get("retry_count", 0)
@@ -208,13 +223,13 @@ class WebhookWorker:
 							await asyncio.sleep(wait_time)
 							
 							# Queue'ya tekrar ekle (FIFO sırası korunur)
-							await webhook_queue.queue.put(queue_item)
+							await self._queue.queue.put(queue_item)
 							
 							# Telegram'a bildir
 							notifier = TelegramNotifier(settings.telegram_bot_token, settings.telegram_chat_id)
 							try:
 								msg = [
-									"⚠️ Retry Yapıldı",
+									f"⚠️ Retry Yapıldı [{self.endpoint_label}]",
 									f"Symbol: {queue_item['symbol']}",
 									f"Signal: {queue_item['signal']}",
 									f"Retry: {retry_count + 1}/{max_retries}",
@@ -230,7 +245,7 @@ class WebhookWorker:
 							# Retry limitine ulaşıldı
 							# Queue'ya tekrar ekle (FIFO sırası korunur)
 							queue_item["retry_count"] = retry_count + 1
-							await webhook_queue.queue.put(queue_item)
+							await self._queue.queue.put(queue_item)
 							
 							# DB'de status'u güncelle
 							if queue_item.get("db_id"):
@@ -247,15 +262,15 @@ class WebhookWorker:
 							# Telegram'a bildir
 							notifier = TelegramNotifier(settings.telegram_bot_token, settings.telegram_chat_id)
 							try:
-								queue_status = await webhook_queue.get_queue_status()
+								queue_status = await self._queue.get_queue_status()
 								msg_lines = [
-									"❌ Retry Limitine Ulaşıldı",
+									f"❌ Retry Limitine Ulaşıldı [{self.endpoint_label}]",
 									f"Symbol: {queue_item['symbol']}",
 									f"Signal: {queue_item['signal']}",
 									f"Hata: {str(e)}",
 									"",
 									"İstek queue'ya tekrar eklendi (FIFO sırası korunur)",
-									f"📊 Mevcut Queue: {queue_status['count']} istek",
+									f"📊 Mevcut {self.endpoint_label} Queue: {queue_status['count']} istek",
 								]
 								await notifier.send_message("\n".join(msg_lines))
 							except Exception:
@@ -266,7 +281,7 @@ class WebhookWorker:
 				# Queue boşsa kısa bekleme
 				await asyncio.sleep(0.1)
 			except Exception as e:
-				print(f"[WebhookWorker] Worker loop hatası: {e}")
+				print(f"[WebhookWorker-{self.endpoint_label}] Worker loop hatası: {e}")
 				await asyncio.sleep(1)
 	
 	async def process_webhook(self, queue_item: Dict[str, Any]) -> Dict[str, Any]:
@@ -274,11 +289,18 @@ class WebhookWorker:
 		Webhook isteğini işle (mevcut handle_tradingview mantığını kullanır).
 		Returns: {"success": bool, "order_id": str, "response": dict, "error": str}
 		"""
+		# Endpoint bilgisini queue_item'a ekle (yoksa)
+		if "endpoint" not in queue_item:
+			queue_item["endpoint"] = self.endpoint
+		
 		# Import here to avoid circular dependency
 		from ..routers.webhook import process_webhook_request
 		return await process_webhook_request(queue_item)
 
 
-# Global worker instance
-webhook_worker = WebhookWorker()
+# Global worker instances - her endpoint için ayrı worker
+webhook_worker_layer1 = WebhookWorker(endpoint="layer1")
+webhook_worker_layer2 = WebhookWorker(endpoint="layer2")
 
+# Geriye uyumluluk için
+webhook_worker = webhook_worker_layer1

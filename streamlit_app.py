@@ -206,6 +206,29 @@ with st.sidebar:
     st.markdown("</div>", unsafe_allow_html=True)
 
     st.markdown("<div class='sidebar-card'>", unsafe_allow_html=True)
+    st.subheader("Endpoint Durumları")
+    ep_configs = get_json("/api/endpoint-configs") or {}
+    if ep_configs.get("success"):
+        ep_data = ep_configs.get("data", {})
+        l1 = ep_data.get("layer1", {})
+        l2 = ep_data.get("layer2", {})
+        
+        l1_status = "🟢 Aktif" if l1.get("enabled", True) else "🔴 Pasif"
+        l2_status = "🟢 Aktif" if l2.get("enabled", True) else "🔴 Pasif"
+        
+        st.markdown(f"""
+        **Layer1:** {l1_status}  
+        USD: ${l1.get('trade_amount_usd', 0):.0f} x {l1.get('multiplier', 1):.1f} = **${l1.get('trade_amount_usd', 0) * l1.get('multiplier', 1):.0f}**  
+        Kaldıraç: {l1.get('leverage', 5)}x
+        """)
+        st.markdown(f"""
+        **Layer2:** {l2_status}  
+        USD: ${l2.get('trade_amount_usd', 0):.0f} x {l2.get('multiplier', 1):.1f} = **${l2.get('trade_amount_usd', 0) * l2.get('multiplier', 1):.0f}**  
+        Kaldıraç: {l2.get('leverage', 5)}x
+        """)
+    st.markdown("</div>", unsafe_allow_html=True)
+
+    st.markdown("<div class='sidebar-card'>", unsafe_allow_html=True)
     st.subheader("Hızlı İşlemler")
     cols = st.columns(2)
     with cols[0]:
@@ -268,6 +291,63 @@ with sec_dashboard:
     if not backend_alive():
         st.error("Backend erişilemiyor. Lütfen sunucunun çalıştığını ve BASE_URL ayarının doğru olduğunu kontrol edin.")
     else:
+        # Endpoint Pozisyonları - Butonlu Görünüm
+        st.markdown("### Endpoint Pozisyonları")
+        
+        col_btn1, col_btn2 = st.columns(2)
+        
+        with col_btn1:
+            if st.button("Layer1 Pozisyonlarını Göster", key="show_l1_pos", use_container_width=True):
+                st.session_state["show_layer1_positions"] = not st.session_state.get("show_layer1_positions", False)
+        
+        with col_btn2:
+            if st.button("Layer2 Pozisyonlarını Göster", key="show_l2_pos", use_container_width=True):
+                st.session_state["show_layer2_positions"] = not st.session_state.get("show_layer2_positions", False)
+        
+        # Pozisyon verilerini çek
+        positions_data = get_json("/api/endpoint-positions") or {}
+        
+        if positions_data.get("success"):
+            pos_data = positions_data.get("data", {})
+            
+            col_pos1, col_pos2 = st.columns(2)
+            
+            with col_pos1:
+                if st.session_state.get("show_layer1_positions", False):
+                    st.markdown("#### Layer 1 Açık Pozisyonları")
+                    l1_positions = pos_data.get("layer1", [])
+                    if l1_positions:
+                        for pos in l1_positions:
+                            side_emoji = "🟢" if pos.get("side") == "LONG" else "🔴"
+                            st.markdown(f"""
+                            <div style="background: #1f2937; padding: 10px; border-radius: 8px; margin-bottom: 8px; border-left: 4px solid {'#22c55e' if pos.get('side') == 'LONG' else '#ef4444'};">
+                                <strong>{side_emoji} {pos.get('symbol')}</strong><br/>
+                                Yön: {pos.get('side')} | Miktar: {pos.get('qty')}<br/>
+                                Giriş: ${pos.get('entry_price', 0):.4f}
+                            </div>
+                            """, unsafe_allow_html=True)
+                    else:
+                        st.info("Layer1'de açık pozisyon yok")
+            
+            with col_pos2:
+                if st.session_state.get("show_layer2_positions", False):
+                    st.markdown("#### Layer 2 Açık Pozisyonları")
+                    l2_positions = pos_data.get("layer2", [])
+                    if l2_positions:
+                        for pos in l2_positions:
+                            side_emoji = "🟢" if pos.get("side") == "LONG" else "🔴"
+                            st.markdown(f"""
+                            <div style="background: #1f2937; padding: 10px; border-radius: 8px; margin-bottom: 8px; border-left: 4px solid {'#22c55e' if pos.get('side') == 'LONG' else '#ef4444'};">
+                                <strong>{side_emoji} {pos.get('symbol')}</strong><br/>
+                                Yön: {pos.get('side')} | Miktar: {pos.get('qty')}<br/>
+                                Giriş: ${pos.get('entry_price', 0):.4f}
+                            </div>
+                            """, unsafe_allow_html=True)
+                    else:
+                        st.info("Layer2'de açık pozisyon yok")
+        
+        st.markdown("---")
+        
         col1, col2, col3 = st.columns(3)
         with col1:
             snaps = get_json("/api/snapshots") or []
@@ -322,6 +402,157 @@ with sec_binance:
 
 with sec_runtime:
     st.subheader("Çalışma Zamanı Ayarları")
+    
+    # Endpoint Config bölümü
+    st.markdown("### Endpoint Ayarları (Layer1 / Layer2)")
+    endpoint_configs = get_json("/api/endpoint-configs") or {}
+    
+    if endpoint_configs.get("success"):
+        configs_data = endpoint_configs.get("data", {})
+        
+        col_l1, col_l2 = st.columns(2)
+        
+        with col_l1:
+            st.markdown("#### Layer 1 (/webhook/tradingview)")
+            l1_config = configs_data.get("layer1", {})
+            l1_enabled = l1_config.get("enabled", True)
+            l1_status = "Aktif" if l1_enabled else "Pasif"
+            st.markdown(f"**Durum:** {'🟢 ' + l1_status if l1_enabled else '🔴 ' + l1_status}")
+            
+            with st.form("layer1_form"):
+                l1_trade_amount = st.number_input(
+                    "İşlem Tutarı (USD)", 
+                    min_value=1.0, 
+                    value=float(l1_config.get("trade_amount_usd", 100)),
+                    key="l1_trade_amount"
+                )
+                l1_multiplier = st.number_input(
+                    "Çarpan", 
+                    min_value=0.1, 
+                    max_value=10.0,
+                    value=float(l1_config.get("multiplier", 1.0)),
+                    step=0.1,
+                    key="l1_multiplier"
+                )
+                l1_leverage = st.number_input(
+                    "Kaldıraç", 
+                    min_value=1, 
+                    max_value=125,
+                    value=int(l1_config.get("leverage", 5)),
+                    key="l1_leverage"
+                )
+                l1_enabled_new = st.checkbox("Aktif", value=l1_enabled, key="l1_enabled")
+                
+                st.info(f"Hesaplanan İşlem Tutarı: **${l1_trade_amount * l1_multiplier:.2f}**")
+                
+                if st.form_submit_button("Layer1 Kaydet"):
+                    res = post_json("/api/endpoint-config/layer1", {
+                        "trade_amount_usd": l1_trade_amount,
+                        "multiplier": l1_multiplier,
+                        "leverage": l1_leverage,
+                        "enabled": l1_enabled_new
+                    })
+                    if res.get("success"):
+                        st.success("Layer1 ayarları kaydedildi!")
+                    else:
+                        st.error(f"Hata: {res.get('error', 'Bilinmeyen')}")
+        
+        with col_l2:
+            st.markdown("#### Layer 2 (/webhook/signal2)")
+            l2_config = configs_data.get("layer2", {})
+            l2_enabled = l2_config.get("enabled", True)
+            l2_status = "Aktif" if l2_enabled else "Pasif"
+            st.markdown(f"**Durum:** {'🟢 ' + l2_status if l2_enabled else '🔴 ' + l2_status}")
+            
+            with st.form("layer2_form"):
+                l2_trade_amount = st.number_input(
+                    "İşlem Tutarı (USD)", 
+                    min_value=1.0, 
+                    value=float(l2_config.get("trade_amount_usd", 100)),
+                    key="l2_trade_amount"
+                )
+                l2_multiplier = st.number_input(
+                    "Çarpan", 
+                    min_value=0.1, 
+                    max_value=10.0,
+                    value=float(l2_config.get("multiplier", 1.0)),
+                    step=0.1,
+                    key="l2_multiplier"
+                )
+                l2_leverage = st.number_input(
+                    "Kaldıraç", 
+                    min_value=1, 
+                    max_value=125,
+                    value=int(l2_config.get("leverage", 5)),
+                    key="l2_leverage"
+                )
+                l2_enabled_new = st.checkbox("Aktif", value=l2_enabled, key="l2_enabled")
+                
+                st.info(f"Hesaplanan İşlem Tutarı: **${l2_trade_amount * l2_multiplier:.2f}**")
+                
+                if st.form_submit_button("Layer2 Kaydet"):
+                    res = post_json("/api/endpoint-config/layer2", {
+                        "trade_amount_usd": l2_trade_amount,
+                        "multiplier": l2_multiplier,
+                        "leverage": l2_leverage,
+                        "enabled": l2_enabled_new
+                    })
+                    if res.get("success"):
+                        st.success("Layer2 ayarları kaydedildi!")
+                    else:
+                        st.error(f"Hata: {res.get('error', 'Bilinmeyen')}")
+    else:
+        st.warning("Endpoint config bilgisi alınamadı. Backend'i kontrol edin.")
+    
+    st.markdown("---")
+    
+    # Endpoint Pozisyonları
+    st.markdown("### Endpoint Pozisyonları (DB'de Takip Edilen)")
+    
+    positions_data = get_json("/api/endpoint-positions") or {}
+    if positions_data.get("success"):
+        pos_data = positions_data.get("data", {})
+        
+        col_pos1, col_pos2 = st.columns(2)
+        
+        with col_pos1:
+            st.markdown("#### Layer 1 Pozisyonları")
+            l1_positions = pos_data.get("layer1", [])
+            if l1_positions:
+                df_l1 = pd.DataFrame(l1_positions)
+                st.dataframe(df_l1, use_container_width=True)
+                if st.button("Layer1 Pozisyonları Sıfırla", key="reset_l1_pos"):
+                    res = requests.delete(f"{BASE_URL}/api/endpoint-positions/layer1", timeout=TIMEOUT)
+                    if res.status_code == 200:
+                        st.success("Layer1 pozisyonları sıfırlandı!")
+                        st.rerun()
+                    else:
+                        st.error("Hata oluştu")
+            else:
+                st.info("Layer1'de açık pozisyon yok")
+        
+        with col_pos2:
+            st.markdown("#### Layer 2 Pozisyonları")
+            l2_positions = pos_data.get("layer2", [])
+            if l2_positions:
+                df_l2 = pd.DataFrame(l2_positions)
+                st.dataframe(df_l2, use_container_width=True)
+                if st.button("Layer2 Pozisyonları Sıfırla", key="reset_l2_pos"):
+                    res = requests.delete(f"{BASE_URL}/api/endpoint-positions/layer2", timeout=TIMEOUT)
+                    if res.status_code == 200:
+                        st.success("Layer2 pozisyonları sıfırlandı!")
+                        st.rerun()
+                    else:
+                        st.error("Hata oluştu")
+            else:
+                st.info("Layer2'de açık pozisyon yok")
+    else:
+        st.warning("Pozisyon bilgisi alınamadı.")
+    
+    st.markdown("---")
+    
+    # Genel Runtime Ayarları
+    st.markdown("### Genel Runtime Ayarları")
     current = get_json("/api/admin/runtime") or {}
     st.write("Geçerli değerler:")
     st.json(current)

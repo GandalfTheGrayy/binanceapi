@@ -267,7 +267,7 @@ class TelegramCommandHandler:
 			await self.notifier.send_message("❌ Geçerli bir tutar girin. Tekrar deneyin:")
 	
 	async def send_report(self, chat_id: str):
-		"""Saatlik raporu gönderir (hourly_pnl_job ile aynı mantık)."""
+		"""Anlık raporu gönderir - Layer bazlı"""
 		db = SessionLocal()
 		client = None
 		try:
@@ -278,17 +278,25 @@ class TelegramCommandHandler:
 				settings.binance_base_url
 			)
 			
-			# Verileri çek
+			# Binance'den verileri çek
 			wallet = 0.0
 			available = 0.0
-			positions = []
+			binance_positions = []
+			mark_prices = {}  # symbol -> mark_price
 			
 			if settings.binance_api_key and settings.binance_api_secret and not settings.dry_run:
 				try:
 					acct = await client.account_usdt_balances()
-					positions = await client.positions()
+					binance_positions = await client.positions()
 					wallet = acct.get("wallet", 0.0)
 					available = acct.get("available", 0.0)
+					
+					# Mark price'ları kaydet
+					for pos in binance_positions:
+						symbol = pos.get("symbol")
+						mark_price = float(pos.get("markPrice", 0.0))
+						if symbol and mark_price > 0:
+							mark_prices[symbol] = mark_price
 				except Exception as e:
 					print(f"[TelegramCommandHandler] Binance veri çekme hatası: {e}")
 			
@@ -306,6 +314,53 @@ class TelegramCommandHandler:
 			pnl_total = (wallet - first_snap.total_wallet_balance) if first_snap else 0.0
 			pnl_1h = (wallet - last_snap.total_wallet_balance) if last_snap else 0.0
 			
+			# ========== LAYER BAZLI POZİSYON ANALİZİ ==========
+			layer_data = {"layer1": {"positions": [], "pnl": 0.0, "cost": 0.0}, 
+			              "layer2": {"positions": [], "pnl": 0.0, "cost": 0.0}}
+			
+			for endpoint in ["layer1", "layer2"]:
+				endpoint_positions = db.query(models.EndpointPosition).filter_by(endpoint=endpoint).all()
+				endpoint_config = db.query(models.EndpointConfig).filter_by(endpoint=endpoint).first()
+				leverage = endpoint_config.leverage if endpoint_config else 5
+				
+				for ep_pos in endpoint_positions:
+					if ep_pos.qty == 0:
+						continue
+					
+					symbol = ep_pos.symbol
+					side = ep_pos.side
+					qty = ep_pos.qty
+					entry_price = ep_pos.entry_price or 0
+					mark_price = mark_prices.get(symbol, entry_price)
+					
+					# PnL hesapla
+					if side == "LONG":
+						unrealized_pnl = (mark_price - entry_price) * qty
+					else:  # SHORT
+						unrealized_pnl = (entry_price - mark_price) * qty
+					
+					# Maliyet (marjin)
+					cost = (entry_price * qty) / leverage if leverage > 0 else 0
+					roe_pct = (unrealized_pnl / cost) * 100 if cost > 0 else 0.0
+					
+					layer_data[endpoint]["positions"].append({
+						"symbol": symbol,
+						"side": side,
+						"qty": qty,
+						"entry_price": entry_price,
+						"mark_price": mark_price,
+						"pnl": unrealized_pnl,
+						"cost": cost,
+						"roe_pct": roe_pct,
+						"leverage": leverage
+					})
+					layer_data[endpoint]["pnl"] += unrealized_pnl
+					layer_data[endpoint]["cost"] += cost
+
+			# Toplam hesapla
+			total_layer_pnl = layer_data["layer1"]["pnl"] + layer_data["layer2"]["pnl"]
+			
+			# ========== MESAJ OLUŞTUR ==========
 			msg = (
 				f"📈 <b>Anlık Rapor</b>\n\n"
 				f"💵 <b>Wallet:</b> {wallet:.2f} USDT\n"
@@ -315,120 +370,179 @@ class TelegramCommandHandler:
 				f"📈 <b>PNL Total:</b> {pnl_total:.2f} USDT\n"
 			)
 			
-			# Açık pozisyonları ekle
-			total_unrealized_pnl = 0.0
-			
-			if positions:
-				msg += "\n📊 <b>Açık Pozisyonlar:</b>\n"
-				for pos in positions:
-					try:
-						symbol = pos.get("symbol")
-						amt = float(pos.get("positionAmt", 0.0))
-						entry_price = float(pos.get("entryPrice", 0.0))
-						mark_price = float(pos.get("markPrice", 0.0))
-						unrealized_pnl = float(pos.get("unRealizedProfit", 0.0))
-						leverage = float(pos.get("leverage", 1.0))
-						
-						if amt == 0:
-							continue
-						
-						side = "LONG" if amt > 0 else "SHORT"
-						initial_margin = (entry_price * abs(amt)) / leverage if leverage > 0 else 0
-						roe_pct = (unrealized_pnl / initial_margin) * 100 if initial_margin > 0 else 0.0
-						
-						total_unrealized_pnl += unrealized_pnl
-						
-						msg += (
-							f"\n<b>{symbol}</b> ({side})\n"
-							f"Giriş: {entry_price} | Mark: {mark_price}\n"
-							f"Miktar: {amt} | Kâr: ${unrealized_pnl:.2f} ({roe_pct:.1f}%)\n"
-						)
-					except Exception as e:
-						print(f"[TelegramCommandHandler] Position işleme hatası: {e}")
-						continue
-				
-				estimated_balance = wallet + total_unrealized_pnl
-				msg += f"\n💰 <b>Tahmini Toplam Bakiye:</b> {estimated_balance:.2f} USDT"
+			# Layer 1 Pozisyonları
+			msg += f"\n{'='*25}\n"
+			msg += f"🔵 <b>LAYER 1 (/tradingview)</b>\n"
+			if layer_data["layer1"]["positions"]:
+				for pos in layer_data["layer1"]["positions"]:
+					pnl_emoji = "🟢" if pos["pnl"] >= 0 else "🔴"
+					msg += (
+						f"\n<b>{pos['symbol']}</b> ({pos['side']})\n"
+						f"Giriş: {pos['entry_price']:.4f} | Mark: {pos['mark_price']:.4f}\n"
+						f"Miktar: {pos['qty']:.6f} | Lev: {pos['leverage']}x\n"
+						f"{pnl_emoji} Kâr: ${pos['pnl']:.2f} ({pos['roe_pct']:.1f}%)\n"
+					)
+				l1_pnl = layer_data["layer1"]["pnl"]
+				l1_emoji = "🟢" if l1_pnl >= 0 else "🔴"
+				msg += f"\n{l1_emoji} <b>Layer1 Toplam:</b> ${l1_pnl:.2f}\n"
 			else:
-				msg += "\n📭 Açık pozisyon yok."
+				msg += "📭 Açık pozisyon yok\n"
 			
-			# Grafik oluştur
+			# Layer 2 Pozisyonları
+			msg += f"\n{'='*25}\n"
+			msg += f"🟣 <b>LAYER 2 (/signal2)</b>\n"
+			if layer_data["layer2"]["positions"]:
+				for pos in layer_data["layer2"]["positions"]:
+					pnl_emoji = "🟢" if pos["pnl"] >= 0 else "🔴"
+					msg += (
+						f"\n<b>{pos['symbol']}</b> ({pos['side']})\n"
+						f"Giriş: {pos['entry_price']:.4f} | Mark: {pos['mark_price']:.4f}\n"
+						f"Miktar: {pos['qty']:.6f} | Lev: {pos['leverage']}x\n"
+						f"{pnl_emoji} Kâr: ${pos['pnl']:.2f} ({pos['roe_pct']:.1f}%)\n"
+					)
+				l2_pnl = layer_data["layer2"]["pnl"]
+				l2_emoji = "🟢" if l2_pnl >= 0 else "🔴"
+				msg += f"\n{l2_emoji} <b>Layer2 Toplam:</b> ${l2_pnl:.2f}\n"
+			else:
+				msg += "📭 Açık pozisyon yok\n"
+			
+			# Genel Toplam
+			msg += f"\n{'='*25}\n"
+			total_emoji = "🟢" if total_layer_pnl >= 0 else "🔴"
+			estimated_balance = wallet + total_layer_pnl
+			msg += (
+				f"💎 <b>TOPLAM</b>\n"
+				f"{total_emoji} <b>Unrealized PnL:</b> ${total_layer_pnl:.2f}\n"
+				f"💰 <b>Şu an kapanırsa:</b> {estimated_balance:.2f} USDT\n"
+			)
+
+			# ========== GRAFİKLER OLUŞTUR ==========
 			graph_bio = None
 			try:
-				# Zaman bazlı veri çekme: Son 24 saat için her saat için en yakın snapshot'ı al
 				end_time = datetime.utcnow()
-				snapshots = []
+				start_time = end_time - timedelta(hours=24)
 				
-				for hour_offset in range(24):
-					target_time = end_time - timedelta(hours=hour_offset)
-					# Her saat için en yakın snapshot'ı bul (30 dakika tolerans)
-					snap = db.query(models.BalanceSnapshot).filter(
-						models.BalanceSnapshot.created_at <= target_time
-					).order_by(models.BalanceSnapshot.created_at.desc()).first()
-					
-					if snap:
-						# Aynı snapshot'ı tekrar eklememek için kontrol et
-						if not snapshots or snapshots[-1].id != snap.id:
-							snapshots.append(snap)
+				# Son 24 saat için layer snapshot'larını çek
+				layer1_snaps = db.query(models.LayerSnapshot).filter(
+					models.LayerSnapshot.endpoint == "layer1",
+					models.LayerSnapshot.created_at >= start_time
+				).order_by(models.LayerSnapshot.created_at.asc()).all()
 				
-				# Zaman sırasına göre sırala (en eski en başta)
-				snapshots.reverse()
+				layer2_snaps = db.query(models.LayerSnapshot).filter(
+					models.LayerSnapshot.endpoint == "layer2",
+					models.LayerSnapshot.created_at >= start_time
+				).order_by(models.LayerSnapshot.created_at.asc()).all()
 				
-				if snapshots and len(snapshots) > 1:
-					dates = [s.created_at.strftime("%H:%M") for s in snapshots]
-					equities = [s.total_equity if s.total_equity is not None else s.total_wallet_balance for s in snapshots]
+				# Ana balance snapshot'larını çek
+				balance_snaps = db.query(models.BalanceSnapshot).filter(
+					models.BalanceSnapshot.created_at >= start_time
+				).order_by(models.BalanceSnapshot.created_at.asc()).all()
+				
+				has_layer_data = len(layer1_snaps) > 1 or len(layer2_snaps) > 1
+				has_balance_data = len(balance_snaps) > 1
+				
+				if has_layer_data or has_balance_data:
+					fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+					fig.suptitle('Son 24 Saat Raporu', fontsize=14, fontweight='bold')
 					
-					# 0 değerlerini interpolasyon ile doldur
-					for i in range(len(equities)):
-						if equities[i] == 0 or equities[i] is None:
-							# Önceki geçerli değeri bul
-							prev_val = None
-							for j in range(i - 1, -1, -1):
-								if equities[j] != 0 and equities[j] is not None:
-									prev_val = equities[j]
-									break
-							
-							# Sonraki geçerli değeri bul
-							next_val = None
-							for j in range(i + 1, len(equities)):
-								if equities[j] != 0 and equities[j] is not None:
-									next_val = equities[j]
-									break
-							
-							# Interpolasyon yap
-							if prev_val is not None and next_val is not None:
-								# Linear interpolation
-								equities[i] = (prev_val + next_val) / 2
-							elif prev_val is not None:
-								equities[i] = prev_val
-							elif next_val is not None:
-								equities[i] = next_val
-							else:
-								# Hiç geçerli değer yoksa 0 bırak
-								equities[i] = 0
-					
-					plt.figure(figsize=(10, 5))
-					plt.plot(dates, equities, marker='o', linestyle='-', color='b', markersize=4)
-					plt.title('Toplam Bakiye (Equity) - Son 24 Saat')
-					plt.xlabel('Saat')
-					plt.ylabel('USDT')
-					plt.grid(True, which='both', linestyle='--', linewidth=0.5)
-					
-					n = len(dates)
-					if n > 12:
-						step = n // 12
-						plt.xticks(range(0, n, step), dates[::step], rotation=45)
+					# Sol üst: Layer 1 PnL
+					ax1 = axes[0, 0]
+					if len(layer1_snaps) > 1:
+						dates1 = [s.created_at.strftime("%H:%M") for s in layer1_snaps]
+						pnls1 = [s.unrealized_pnl for s in layer1_snaps]
+						colors1 = ['green' if p >= 0 else 'red' for p in pnls1]
+						ax1.bar(range(len(dates1)), pnls1, color=colors1, alpha=0.7)
+						ax1.axhline(y=0, color='gray', linestyle='--', linewidth=0.5)
+						ax1.set_title('Layer 1 PnL', fontweight='bold', color='blue')
+						ax1.set_ylabel('USDT')
+						if len(dates1) > 8:
+							step = len(dates1) // 8
+							ax1.set_xticks(range(0, len(dates1), step))
+							ax1.set_xticklabels(dates1[::step], rotation=45, fontsize=8)
+						else:
+							ax1.set_xticks(range(len(dates1)))
+							ax1.set_xticklabels(dates1, rotation=45, fontsize=8)
 					else:
-						plt.xticks(rotation=45)
+						ax1.text(0.5, 0.5, 'Veri yok', ha='center', va='center', transform=ax1.transAxes)
+						ax1.set_title('Layer 1 PnL', fontweight='bold', color='blue')
+					ax1.grid(True, alpha=0.3)
+					
+					# Sağ üst: Layer 2 PnL
+					ax2 = axes[0, 1]
+					if len(layer2_snaps) > 1:
+						dates2 = [s.created_at.strftime("%H:%M") for s in layer2_snaps]
+						pnls2 = [s.unrealized_pnl for s in layer2_snaps]
+						colors2 = ['green' if p >= 0 else 'red' for p in pnls2]
+						ax2.bar(range(len(dates2)), pnls2, color=colors2, alpha=0.7)
+						ax2.axhline(y=0, color='gray', linestyle='--', linewidth=0.5)
+						ax2.set_title('Layer 2 PnL', fontweight='bold', color='purple')
+						ax2.set_ylabel('USDT')
+						if len(dates2) > 8:
+							step = len(dates2) // 8
+							ax2.set_xticks(range(0, len(dates2), step))
+							ax2.set_xticklabels(dates2[::step], rotation=45, fontsize=8)
+						else:
+							ax2.set_xticks(range(len(dates2)))
+							ax2.set_xticklabels(dates2, rotation=45, fontsize=8)
+					else:
+						ax2.text(0.5, 0.5, 'Veri yok', ha='center', va='center', transform=ax2.transAxes)
+						ax2.set_title('Layer 2 PnL', fontweight='bold', color='purple')
+					ax2.grid(True, alpha=0.3)
+					
+					# Sol alt: Toplam Unrealized PnL
+					ax3 = axes[1, 0]
+					if has_balance_data:
+						dates3 = [s.created_at.strftime("%H:%M") for s in balance_snaps]
+						total_pnls = [s.unrealized_pnl if s.unrealized_pnl else 0 for s in balance_snaps]
+						colors3 = ['green' if p >= 0 else 'red' for p in total_pnls]
+						ax3.bar(range(len(dates3)), total_pnls, color=colors3, alpha=0.7)
+						ax3.axhline(y=0, color='gray', linestyle='--', linewidth=0.5)
+						ax3.set_title('Toplam Unrealized PnL', fontweight='bold')
+						ax3.set_ylabel('USDT')
+						if len(dates3) > 8:
+							step = len(dates3) // 8
+							ax3.set_xticks(range(0, len(dates3), step))
+							ax3.set_xticklabels(dates3[::step], rotation=45, fontsize=8)
+						else:
+							ax3.set_xticks(range(len(dates3)))
+							ax3.set_xticklabels(dates3, rotation=45, fontsize=8)
+					else:
+						ax3.text(0.5, 0.5, 'Veri yok', ha='center', va='center', transform=ax3.transAxes)
+						ax3.set_title('Toplam Unrealized PnL', fontweight='bold')
+					ax3.grid(True, alpha=0.3)
+					
+					# Sağ alt: Equity (Şu an kapanırsa)
+					ax4 = axes[1, 1]
+					if has_balance_data:
+						dates4 = [s.created_at.strftime("%H:%M") for s in balance_snaps]
+						equities = [s.total_equity if s.total_equity else s.total_wallet_balance for s in balance_snaps]
+						ax4.plot(range(len(dates4)), equities, marker='o', linestyle='-', color='gold', markersize=4)
+						ax4.fill_between(range(len(dates4)), equities, alpha=0.3, color='gold')
+						ax4.set_title('Tahmini Bakiye (Şu an kapanırsa)', fontweight='bold')
+						ax4.set_ylabel('USDT')
+						if len(dates4) > 8:
+							step = len(dates4) // 8
+							ax4.set_xticks(range(0, len(dates4), step))
+							ax4.set_xticklabels(dates4[::step], rotation=45, fontsize=8)
+						else:
+							ax4.set_xticks(range(len(dates4)))
+							ax4.set_xticklabels(dates4, rotation=45, fontsize=8)
+					else:
+						ax4.text(0.5, 0.5, 'Veri yok', ha='center', va='center', transform=ax4.transAxes)
+						ax4.set_title('Tahmini Bakiye (Şu an kapanırsa)', fontweight='bold')
+					ax4.grid(True, alpha=0.3)
 					
 					plt.tight_layout()
 					
 					graph_bio = io.BytesIO()
-					plt.savefig(graph_bio, format='png')
+					plt.savefig(graph_bio, format='png', dpi=100)
 					graph_bio.seek(0)
 					plt.close()
+					
 			except Exception as e:
 				print(f"[TelegramCommandHandler] Grafik oluşturma hatası: {e}")
+				import traceback
+				traceback.print_exc()
 			
 			# Mesajı gönder
 			if graph_bio:

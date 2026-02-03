@@ -7,6 +7,7 @@ class WebhookEvent(Base):
 	__tablename__ = "webhook_events"
 
 	id = Column(Integer, primary_key=True, index=True)
+	endpoint = Column(String(32), index=True, default="layer1")  # "layer1" veya "layer2"
 	symbol = Column(String(32), index=True)
 	signal = Column(String(16), index=True)
 	price = Column(Float, nullable=True)
@@ -20,6 +21,7 @@ class OrderRecord(Base):
 	__tablename__ = "orders"
 
 	id = Column(Integer, primary_key=True, index=True)
+	endpoint = Column(String(32), index=True, default="layer1")  # "layer1" veya "layer2"
 	binance_order_id = Column(String(64), index=True, nullable=True)
 	symbol = Column(String(32), index=True)
 	side = Column(String(16), index=True)
@@ -67,4 +69,43 @@ class RuntimeSettings(Base):
 	key = Column(String(64), unique=True, index=True)
 	value = Column(Text)
 	updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+
+class EndpointPosition(Base):
+	"""Her endpoint'in açtığı pozisyonları takip eder"""
+	__tablename__ = "endpoint_positions"
+
+	id = Column(Integer, primary_key=True, index=True)
+	endpoint = Column(String(32), index=True)  # "layer1" veya "layer2"
+	symbol = Column(String(32), index=True)
+	side = Column(String(16))  # "LONG" veya "SHORT"
+	qty = Column(Float, default=0)
+	entry_price = Column(Float, nullable=True)
+	updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+
+class EndpointConfig(Base):
+	"""Her endpoint için ayrı ayarlar"""
+	__tablename__ = "endpoint_configs"
+
+	id = Column(Integer, primary_key=True, index=True)
+	endpoint = Column(String(32), unique=True, index=True)  # "layer1" veya "layer2"
+	trade_amount_usd = Column(Float, default=100.0)  # USD tutarı
+	multiplier = Column(Float, default=1.0)  # Çarpan
+	leverage = Column(Integer, default=5)
+	enabled = Column(Boolean, default=True)
+	created_at = Column(DateTime(timezone=True), server_default=func.now())
+	updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+
+class LayerSnapshot(Base):
+	"""Her layer için ayrı snapshot (grafik için)"""
+	__tablename__ = "layer_snapshots"
+
+	id = Column(Integer, primary_key=True, index=True)
+	endpoint = Column(String(32), index=True)  # "layer1" veya "layer2"
+	unrealized_pnl = Column(Float, default=0.0)
+	total_cost = Column(Float, default=0.0)  # Toplam maliyet (marjin)
+	position_count = Column(Integer, default=0)
+	created_at = Column(DateTime(timezone=True), server_default=func.now(), index=True)
 
